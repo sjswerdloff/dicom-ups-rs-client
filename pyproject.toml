@@ -1,0 +1,50 @@
+[project]
+name = "dicom-ups-rs-client"
+version = "0.1.0"
+description = "A comprehensive Python client for interacting with DICOM UPS-RS services"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "pydicom>=3.0.1,<4.0",
+    "requests>=2.32.3, <3.0",
+    "websockets>=15.0.1, <16.0",
+]
+
+[project.license]
+text = "MIT"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0, <9.0",
+    "pytest-cov>=6.1.1, <7.0",
+    "ruff>=0.11.0, <1.0",
+    "tomli>=2.2.1, <3.0",
+    "tomli-w>=1.2.0, <2.0",
+]
+
+[project.scripts]
+ups-rs-client = "ups_rs_client:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/dicom-ups-rs-client"
+"Bug Tracker" = "https://github.com/yourusername/dicom-ups-rs-client/issues"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+]
