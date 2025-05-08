@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup  # noqa: D100
 
 setup(
     name="dicom_ups_rs_client",
