@@ -134,10 +134,11 @@ class UPSRSClient:
         self.logger = logger or logging.getLogger("ups_rs_client")
         if not logger:
             self.logger.setLevel(logging.DEBUG)
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
 
         # WebSocket connection state
         self.ws_connection = None
