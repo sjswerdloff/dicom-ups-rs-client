@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from pydicom.uid import generate_uid
 from requests.structures import CaseInsensitiveDict
+from websockets.exceptions import WebSocketException
 
 from dicom_ups_rs_client.ups_rs_client import UPSRSClient
 
@@ -542,3 +543,67 @@ def websocket_with_events():  # noqa: ANN201
         return mock_connect, mock_ws
 
     return _create_websocket_with_events
+
+
+@pytest.fixture
+def websocket_error_connect():  # noqa: ANN201
+    """
+    Fixture to create a WebSocket connect function that raises exceptions.
+
+    This fixture simulates a websocket connection that raises an exception
+    during different parts of the connection lifecycle.
+    """
+
+    # Create a special MockWebSocket that raises exceptions
+    class ErrorMockWebSocket(MockWebSocket):
+        def __init__(self, error_type=None, error_location="aenter", error_msg="Connection error") -> None:  # noqa: ANN001
+            super().__init__()
+            self.error_type = error_type or WebSocketException
+            self.error_location = error_location
+            self.error_msg = error_msg
+
+        async def __aenter__(self):  # noqa: ANN204
+            """Async context manager entry with optional exception."""
+            if self.error_location == "aenter":
+                raise self.error_type(self.error_msg)
+            self.connected = True
+            return self
+
+        async def recv(self):  # noqa: ANN202
+            """Receive with optional exception."""
+            if self.error_location == "recv":
+                raise self.error_type(self.error_msg)
+            return await super().recv()
+
+        async def send(self, message) -> None:  # noqa: ANN001
+            """Send with optional exception."""
+            if self.error_location == "send":
+                raise self.error_type(self.error_msg)
+            await super().send(message)
+
+    def _create_error_connect(error_type=None, error_location="aenter", error_msg="Connection error"):  # noqa: ANN001, ANN202
+        """
+        Create a mock websocket connect function that raises errors.
+
+        Args:
+            error_type: Exception class to raise (default: WebSocketException)
+            error_location: Where to raise the exception - 'aenter', 'recv', or 'send'
+            error_msg: Error message for the exception
+
+        Returns:
+            A mock connect function that returns a WebSocket that raises an exception
+
+        """
+        if error_type is None:
+            error_type = WebSocketException
+
+        # Create a mock WebSocket that will raise the exception
+        mock_ws = ErrorMockWebSocket(error_type, error_location, error_msg)
+
+        # Return a function that matches websockets.connect signature
+        def mock_connect(*args: tuple, **kwargs: dict[str, any]):  # noqa: ANN202
+            return mock_ws
+
+        return mock_connect
+
+    return _create_error_connect

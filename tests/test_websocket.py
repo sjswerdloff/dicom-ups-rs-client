@@ -257,28 +257,43 @@ async def test_disconnect(
 
 
 @pytest.mark.asyncio
-async def test_websocket_connection_error(mock_ups_rs_client: UPSRSClient) -> None:
+async def test_websocket_connection_error(mock_ups_rs_client: UPSRSClient, websocket_error_connect) -> None:  # noqa: ANN001
     """
     Test WebSocket connection error handling.
 
     Args:
         mock_ups_rs_client: Mocked UPS-RS client
+        websocket_error_connect: Fixture to create WebSocket connect function that raises errors
 
     """
-    # Mock websockets.connect to raise an exception
-    with patch("websockets.connect", AsyncMock(side_effect=websockets.exceptions.WebSocketException("Connection error"))):
-        # Set WebSocket URL
-        mock_ups_rs_client.ws_url = "ws://example.com/dicom-web/subscribers/TEST_AE"
+    # Save original retry parameters
+    original_max_retries = mock_ups_rs_client.max_retries
+    original_retry_delay = mock_ups_rs_client.retry_delay
 
-        # Connect to WebSocket
-        result = mock_ups_rs_client.connect_websocket()
-        assert result is True  # Initial result should be True as thread is started
+    try:
+        # Use smaller values for testing to make the test complete faster
+        mock_ups_rs_client.max_retries = 2
+        mock_ups_rs_client.retry_delay = 0.1
 
-        # Give it time to try connecting
-        time.sleep(0.5)
+        connect_mock = websocket_error_connect()  # Uses defaults: WebSocketException during aenter
 
-        # Should eventually set running to False after max retries
-        assert mock_ups_rs_client.running is False
+        with patch("websockets.connect", connect_mock):
+            # Set WebSocket URL
+            mock_ups_rs_client.ws_url = "ws://example.com/dicom-web/subscribers/TEST_AE"
+
+            # Connect to WebSocket
+            result = mock_ups_rs_client.connect_websocket()
+            assert result is True  # Initial result should be True as thread is started
+
+            # Give it time to try connecting
+            time.sleep(0.5)
+
+            # Should eventually set running to False after max retries
+            assert mock_ups_rs_client.running is False
+    finally:
+        # Restore original parameters
+        mock_ups_rs_client.max_retries = original_max_retries
+        mock_ups_rs_client.retry_delay = original_retry_delay
 
 
 @pytest.mark.asyncio

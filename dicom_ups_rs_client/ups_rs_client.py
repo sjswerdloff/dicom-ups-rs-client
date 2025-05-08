@@ -1134,8 +1134,8 @@ class UPSRSClient:
         import websockets
 
         # Initial connection
-        retry_delay = 5  # seconds
-        max_retries = 10
+        retry_delay = self.retry_delay  # seconds
+        max_retries = self.max_retries
         retry_count = 0
 
         while self.running:

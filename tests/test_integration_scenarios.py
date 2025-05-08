@@ -253,7 +253,7 @@ def test_cancellation_workflow(mock_ups_rs_client: UPSRSClient, sample_workitem:
     assert result["00741000"]["Value"][0] == "CANCELED"
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio()
 async def test_async_workflow(mock_ups_rs_client: UPSRSClient, sample_workitem: dict, response_factory: callable) -> None:
     """Test asynchronous workflow combining multiple operations."""
     # 1. Create three workitems asynchronously
