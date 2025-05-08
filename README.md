@@ -21,7 +21,7 @@ A comprehensive Python client for interacting with DICOM UPS-RS (Unified Procedu
 From source:
 
 ```bash
-git clone https://github.com/your-username/dicom-ups-rs-client.git
+git clone https://github.com/sjswerdloff/dicom-ups-rs-client.git
 cd dicom-ups-rs-client
 pip install -e .
 ```
