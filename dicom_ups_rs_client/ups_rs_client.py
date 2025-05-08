@@ -1,3 +1,5 @@
+"""DICOM UPS-RS Client."""
+
 import argparse
 import asyncio
 import json
@@ -6,25 +8,18 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,  # , AsyncIterator
-    Tuple,
-    Union,
-)
+from typing import Any
 
 # from asyncio import Future
 from urllib.parse import urlencode
 
 import requests
-from pydicom import dcmread, uid, Dataset
+from pydicom import Dataset, dcmread, uid
 from pydicom.uid import generate_uid
 
 __all__ = [
@@ -59,6 +54,7 @@ class InputReadinessState(Enum):
     INCOMPLETE = auto()
 
     def __str__(self) -> str:
+        """Return string representation for UPS-RS protocol."""
         return self.name
 
 
@@ -71,9 +67,16 @@ class UPSRSError(Exception):
 class UPSRSResponseError(UPSRSError):
     """Exception raised for errors in the response from the UPS-RS server."""
 
-    def __init__(
-        self, message: str, status_code: int, response_text: Optional[str] = None
-    ):
+    def __init__(self, message: str, status_code: int, response_text: str | None = None) -> None:
+        """
+        Initialize the exception.
+
+        Args:
+            message (str): _description_
+            status_code (int): _description_
+            response_text (str | None, optional): _description_. Defaults to None.
+
+        """
         self.status_code = status_code
         self.response_text = response_text
         super().__init__(message)
@@ -103,12 +106,12 @@ class UPSRSClient:
     def __init__(
         self,
         base_url: str,
-        aetitle: Optional[str] = None,
+        aetitle: str | None = None,
         timeout: int = 30,
         max_retries: int = 3,
         retry_delay: int = 1,
-        logger: Optional[logging.Logger] = None,
-    ):
+        logger: logging.Logger | None = None,
+    ) -> None:
         """
         Initialize the UPS-RS client.
 
@@ -119,6 +122,7 @@ class UPSRSClient:
             max_retries: Maximum number of request retries
             retry_delay: Delay between retries in seconds
             logger: Optional logger instance
+
         """
         self.base_url = base_url.rstrip("/")
         self.aetitle = aetitle
@@ -128,6 +132,12 @@ class UPSRSClient:
 
         # Set up logging
         self.logger = logger or logging.getLogger("ups_rs_client")
+        if not logger:
+            self.logger.setLevel(logging.DEBUG)
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
 
         # WebSocket connection state
         self.ws_connection = None
@@ -142,46 +152,62 @@ class UPSRSClient:
         # Thread pool for async operations
         self.executor = ThreadPoolExecutor(max_workers=5)
 
-    def __enter__(self):
+    def __enter__(self):  # noqa: ANN204
         """Enter the runtime context for this client."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):  # noqa: ANN001, ANN204
         """Exit the runtime context for this client."""
         self.close()
         return False  # Propagate exceptions
 
-    def close(self):
+    def close(self) -> None:
         """Close the client and release all resources."""
         # Disconnect WebSocket if connected
         if self.running:
-            self.disconnect()
+            try:
+                self.disconnect()
+            except Exception as e:
+                # Log the exception but continue closing resources
+                if hasattr(self, "logger"):
+                    self.logger.error(f"Error during disconnect: {e}")
 
         # Close thread pool
         if hasattr(self, "executor"):
-            self.executor.shutdown(wait=True)
+            try:
+                self.executor.shutdown(wait=True)
+            except Exception as e:
+                # Log the exception but continue closing resources
+                if hasattr(self, "logger"):
+                    self.logger.error(f"Error shutting down executor: {e}")
 
         # Close HTTP session
         if hasattr(self, "session"):
-            self.session.close()
+            try:
+                self.session.close()
+            except Exception as e:
+                # Log the exception
+                if hasattr(self, "logger"):
+                    self.logger.error(f"Error closing session: {e}")
 
     # ========== Core Operations ==========
 
     def create_workitem(
         self,
-        workitem_data: Optional[Dict[str, Any]] = None,
-        workitem_uid: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        workitem_data: dict[str, Any] | None = None,
+        workitem_uid: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Create a new workitem on the UPS-RS server.
 
         Args:
-            workitem_data: Dictionary containing the workitem dataset
+            workitem_data: dictionary containing the workitem dataset
             workitem_uid: Optional UID for the workitem. If not provided,
                           it will be generated or assigned by the server.
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         # Use default workitem data if none provided
         if workitem_data is None:
@@ -203,13 +229,9 @@ class UPSRSClient:
             "Accept": "application/dicom+json",
         }
 
-        return self._send_request(
-            "POST", endpoint, headers=headers, json_data=workitem_data, success_code=201
-        )
+        return self._send_request("POST", endpoint, headers=headers, json_data=workitem_data, success_code=201)
 
-    def retrieve_workitem(
-        self, workitem_uid: str
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def retrieve_workitem(self, workitem_uid: str) -> tuple[bool, dict[str, Any] | str]:
         """
         Retrieve a workitem from the UPS-RS server.
 
@@ -217,7 +239,8 @@ class UPSRSClient:
             workitem_uid: UID of the workitem to retrieve
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         # Validate the DICOM UID format
         if not self.validate_uid(workitem_uid):
@@ -239,12 +262,12 @@ class UPSRSClient:
         offset: int = 0,
         limit: int | None = None,
         no_cache: bool = False,
-    ) -> Tuple[bool, Union[List[Dict[str, Any]], str]]:
+    ) -> tuple[bool, list[dict[str, Any]] | str]:
         """
         Search for workitems on the UPS-RS server.
 
         Args:
-            match_parameters: Dictionary of attribute/value pairs to match
+            match_parameters: dictionary of attribute/value pairs to match
             include_fields: Optional list of additional fields to include in results
             fuzzy_matching: Whether to use fuzzy matching (default: False)
             offset: Starting position of results (default: 0)
@@ -252,7 +275,8 @@ class UPSRSClient:
             no_cache: Whether to request non-cached results (default: False)
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         params = dict(match_parameters)
         # Add include fields if provided
@@ -285,19 +309,11 @@ class UPSRSClient:
         success, response = self._send_request("GET", endpoint, headers=headers)
 
         # Handle 204 No Content response
-        if (
-            success
-            and isinstance(response, dict)
-            and response.get("status_code") == 204
-        ):
+        if success and isinstance(response, dict) and response.get("status_code") == 204:
             return True, []
 
         # Handle 206 Partial Content
-        if (
-            success
-            and isinstance(response, dict)
-            and response.get("status_code") == 206
-        ):
+        if success and isinstance(response, dict) and response.get("status_code") == 206:
             self.logger.info("Search returned partial results (more available)")
 
         return success, response
@@ -305,19 +321,20 @@ class UPSRSClient:
     def update_workitem(
         self,
         workitem_uid: str,
-        transaction_uid: Optional[str],
-        update_data: Dict[str, Any],
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        transaction_uid: str | None,
+        update_data: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Update a workitem on the UPS-RS server.
 
         Args:
             workitem_uid: UID of the workitem to update
             transaction_uid: Transaction UID (required for updates to IN PROGRESS workitems)
-            update_data: Dictionary containing the workitem attributes to update
+            update_data: dictionary containing the workitem attributes to update
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         # Validate the DICOM UID format
         if not self.validate_uid(workitem_uid):
@@ -344,16 +361,14 @@ class UPSRSClient:
             "Accept": "application/dicom+json",
         }
 
-        return self._send_request(
-            "PUT", endpoint, headers=headers, json_data=update_data
-        )
+        return self._send_request("PUT", endpoint, headers=headers, json_data=update_data)
 
     def change_workitem_state(
         self,
         workitem_uid: str,
-        new_state: Union[str, UPSState],
-        transaction_uid: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        new_state: str | UPSState,
+        transaction_uid: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Change the state of a workitem on the UPS-RS server.
 
@@ -365,7 +380,8 @@ class UPSRSClient:
                              If None, a new one will be generated for IN PROGRESS state
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         # Validate the DICOM UID format
         if not self.validate_uid(workitem_uid):
@@ -418,9 +434,7 @@ class UPSRSClient:
             # Transaction UID (0008,1195)
             payload["00081195"] = {"vr": "UI", "Value": [transaction_uid]}
 
-        success, response = self._send_request(
-            "PUT", endpoint, headers=headers, json_data=payload
-        )
+        success, response = self._send_request("PUT", endpoint, headers=headers, json_data=payload)
 
         if success and isinstance(response, dict):
             response["transaction_uid"] = transaction_uid
@@ -430,10 +444,10 @@ class UPSRSClient:
     def request_cancellation(
         self,
         workitem_uid: str,
-        reason: Optional[str] = None,
-        contact_name: Optional[str] = None,
-        contact_uri: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        reason: str | None = None,
+        contact_name: str | None = None,
+        contact_uri: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Request cancellation of a workitem on the UPS-RS server.
 
@@ -444,7 +458,8 @@ class UPSRSClient:
             contact_uri: Optional URI for contacting the requestor
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         # Validate the DICOM UID format
         if not self.validate_uid(workitem_uid):
@@ -474,15 +489,11 @@ class UPSRSClient:
             "Accept": "application/dicom+json",
         }
 
-        return self._send_request(
-            "POST", endpoint, headers=headers, json_data=payload, success_code=202
-        )
+        return self._send_request("POST", endpoint, headers=headers, json_data=payload, success_code=202)
 
     # ========== Event Management ==========
 
-    def subscribe_to_worklist(
-        self, deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def subscribe_to_worklist(self, deletion_lock: bool = False) -> tuple[bool, dict[str, Any] | str]:
         """
         Subscribe to all workitems in the worklist.
 
@@ -490,7 +501,8 @@ class UPSRSClient:
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
@@ -505,25 +517,24 @@ class UPSRSClient:
         return self._send_subscription_request(endpoint)
 
     def subscribe_to_filtered_worklist(
-        self, filter_params: Dict[str, str], deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        self, filter_params: dict[str, str], deletion_lock: bool = False
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Subscribe to workitems matching the specified filter criteria.
 
         Args:
-            filter_params: Dictionary of attribute/value pairs to filter on
+            filter_params: dictionary of attribute/value pairs to filter on
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
 
         # Build filter parameter string
-        filter_str = ",".join(
-            [f"{key}={value}" for key, value in filter_params.items()]
-        )
+        filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
 
         # Set endpoint URL with filter parameter
         endpoint = f"{self.base_url}/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/{self.aetitle}"
@@ -535,9 +546,7 @@ class UPSRSClient:
 
         return self._send_subscription_request(endpoint)
 
-    def subscribe_to_workitem(
-        self, workitem_uid: str, deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def subscribe_to_workitem(self, workitem_uid: str, deletion_lock: bool = False) -> tuple[bool, dict[str, Any] | str]:
         """
         Subscribe to a specific workitem.
 
@@ -546,7 +555,8 @@ class UPSRSClient:
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
@@ -556,9 +566,7 @@ class UPSRSClient:
             return False, f"Invalid DICOM UID format for workitem_uid: {workitem_uid}"
 
         # Set endpoint URL
-        endpoint = (
-            f"{self.base_url}/workitems/{workitem_uid}/subscribers/{self.aetitle}"
-        )
+        endpoint = f"{self.base_url}/workitems/{workitem_uid}/subscribers/{self.aetitle}"
 
         # Add deletion lock parameter if requested
         if deletion_lock:
@@ -566,9 +574,7 @@ class UPSRSClient:
 
         return self._send_subscription_request(endpoint)
 
-    def unsubscribe_from_worklist(
-        self, deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def unsubscribe_from_worklist(self, deletion_lock: bool = False) -> tuple[bool, dict[str, Any] | str]:
         """
         Unsubscribe from all workitems in the worklist.
 
@@ -576,7 +582,8 @@ class UPSRSClient:
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
@@ -591,25 +598,24 @@ class UPSRSClient:
         return self._send_unsubscription_request(endpoint)
 
     def unsubscribe_from_filtered_worklist(
-        self, filter_params: Dict[str, str], deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        self, filter_params: dict[str, str], deletion_lock: bool = False
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Unsubscribe from workitems matching the specified filter criteria.
 
         Args:
-            filter_params: Dictionary of attribute/value pairs to filter on
+            filter_params: dictionary of attribute/value pairs to filter on
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
 
         # Build filter parameter string
-        filter_str = ",".join(
-            [f"{key}={value}" for key, value in filter_params.items()]
-        )
+        filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
 
         # Set endpoint URL with filter parameter
         endpoint = f"{self.base_url}/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/{self.aetitle}"
@@ -621,9 +627,7 @@ class UPSRSClient:
 
         return self._send_unsubscription_request(endpoint)
 
-    def unsubscribe_from_workitem(
-        self, workitem_uid: str, deletion_lock: bool = False
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def unsubscribe_from_workitem(self, workitem_uid: str, deletion_lock: bool = False) -> tuple[bool, dict[str, Any] | str]:
         """
         Unsubscribe from a specific workitem.
 
@@ -632,7 +636,8 @@ class UPSRSClient:
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         if not self.aetitle:
             return False, "AE Title is required for subscription operations"
@@ -642,9 +647,7 @@ class UPSRSClient:
             return False, f"Invalid DICOM UID format for workitem_uid: {workitem_uid}"
 
         # Set endpoint URL
-        endpoint = (
-            f"{self.base_url}/workitems/{workitem_uid}/subscribers/{self.aetitle}"
-        )
+        endpoint = f"{self.base_url}/workitems/{workitem_uid}/subscribers/{self.aetitle}"
 
         # Add deletion lock parameter if requested
         if deletion_lock:
@@ -652,9 +655,7 @@ class UPSRSClient:
 
         return self._send_unsubscription_request(endpoint)
 
-    def connect_websocket(
-        self, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
-    ) -> bool:
+    def connect_websocket(self, event_callback: Callable[[dict[str, Any]], None] | None = None) -> bool:
         """
         Connect to the WebSocket for receiving notifications.
 
@@ -663,11 +664,10 @@ class UPSRSClient:
 
         Returns:
             bool: True if connection started, False otherwise
+
         """
         if not self.ws_url:
-            self.logger.error(
-                "No WebSocket URL available. Create a subscription first."
-            )
+            self.logger.error("No WebSocket URL available. Create a subscription first.")
             return False
 
         self.event_callback = event_callback
@@ -677,6 +677,7 @@ class UPSRSClient:
         self.ws_thread = threading.Thread(target=self._run_websocket_thread)
         self.ws_thread.daemon = True
         self.ws_thread.start()
+        self.logger.info(f"Connecting to WebSocket: {self.ws_url}")
 
         return True
 
@@ -699,27 +700,24 @@ class UPSRSClient:
 
     async def create_workitem_async(
         self,
-        workitem_data: Optional[Dict[str, Any]] = None,
-        workitem_uid: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        workitem_data: dict[str, Any] | None = None,
+        workitem_uid: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Asynchronously create a new workitem on the UPS-RS server.
 
         Args:
-            workitem_data: Dictionary containing the workitem dataset
+            workitem_data: dictionary containing the workitem dataset
             workitem_uid: Optional UID for the workitem
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor, lambda: self.create_workitem(workitem_data, workitem_uid)
-        )
+        return await loop.run_in_executor(self.executor, lambda: self.create_workitem(workitem_data, workitem_uid))
 
-    async def retrieve_workitem_async(
-        self, workitem_uid: str
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    async def retrieve_workitem_async(self, workitem_uid: str) -> tuple[bool, dict[str, Any] | str]:
         """
         Asynchronously retrieve a workitem from the UPS-RS server.
 
@@ -727,27 +725,26 @@ class UPSRSClient:
             workitem_uid: UID of the workitem to retrieve
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor, lambda: self.retrieve_workitem(workitem_uid)
-        )
+        return await loop.run_in_executor(self.executor, lambda: self.retrieve_workitem(workitem_uid))
 
     async def search_workitems_async(
         self,
-        match_parameters: Dict[str, str],
-        include_fields: Optional[List[str]] = None,
+        match_parameters: dict[str, str],
+        include_fields: list[str] | None = None,
         fuzzy_matching: bool = False,
         offset: int = 0,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         no_cache: bool = False,
-    ) -> Tuple[bool, Union[List[Dict[str, Any]], str]]:
+    ) -> tuple[bool, list[dict[str, Any]] | str]:
         """
         Asynchronously search for workitems on the UPS-RS server.
 
         Args:
-            match_parameters: Dictionary of attribute/value pairs to match
+            match_parameters: dictionary of attribute/value pairs to match
             include_fields: Optional list of additional fields to include in results
             fuzzy_matching: Whether to use fuzzy matching (default: False)
             offset: Starting position of results (default: 0)
@@ -755,7 +752,8 @@ class UPSRSClient:
             no_cache: Whether to request non-cached results (default: False)
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -773,19 +771,20 @@ class UPSRSClient:
     async def update_workitem_async(
         self,
         workitem_uid: str,
-        transaction_uid: Optional[str],
-        update_data: Dict[str, Any],
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        transaction_uid: str | None,
+        update_data: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Asynchronously update a workitem on the UPS-RS server.
 
         Args:
             workitem_uid: UID of the workitem to update
             transaction_uid: Transaction UID (required for updates to IN PROGRESS workitems)
-            update_data: Dictionary containing the workitem attributes to update
+            update_data: dictionary containing the workitem attributes to update
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -796,9 +795,9 @@ class UPSRSClient:
     async def change_workitem_state_async(
         self,
         workitem_uid: str,
-        new_state: Union[str, UPSState],
-        transaction_uid: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        new_state: str | UPSState,
+        transaction_uid: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Asynchronously change the state of a workitem on the UPS-RS server.
 
@@ -808,23 +807,22 @@ class UPSRSClient:
             transaction_uid: Transaction UID (required for state changes)
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.executor,
-            lambda: self.change_workitem_state(
-                workitem_uid, new_state, transaction_uid
-            ),
+            lambda: self.change_workitem_state(workitem_uid, new_state, transaction_uid),
         )
 
     async def request_cancellation_async(
         self,
         workitem_uid: str,
-        reason: Optional[str] = None,
-        contact_name: Optional[str] = None,
-        contact_uri: Optional[str] = None,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+        reason: str | None = None,
+        contact_name: str | None = None,
+        contact_uri: str | None = None,
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Asynchronously request cancellation of a workitem on the UPS-RS server.
 
@@ -835,14 +833,13 @@ class UPSRSClient:
             contact_uri: Optional URI for contacting the requestor
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.executor,
-            lambda: self.request_cancellation(
-                workitem_uid, reason, contact_name, contact_uri
-            ),
+            lambda: self.request_cancellation(workitem_uid, reason, contact_name, contact_uri),
         )
 
     # ========== Utility Methods ==========
@@ -857,15 +854,17 @@ class UPSRSClient:
 
         Returns:
             bool: True if valid, False otherwise
+
         """
         return uid.UID(uid_string).is_valid
 
-    def _create_default_workitem(self) -> Dict[str, Any]:
+    def _create_default_workitem(self) -> dict[str, Any]:
         """
         Create a default workitem dataset with required attributes.
 
         Returns:
-            Dictionary containing a default workitem dataset
+            dictionary containing a default workitem dataset
+
         """
         # Current time
         now = datetime.now()
@@ -900,10 +899,10 @@ class UPSRSClient:
         self,
         method: str,
         url: str,
-        headers: Dict[str, str] = None,
-        json_data: Any = None,
+        headers: dict[str, str] = None,
+        json_data: Any = None,  # noqa: ANN401
         success_code: int = 200,
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    ) -> tuple[bool, dict[str, Any] | str]:
         """
         Send an HTTP request to the UPS-RS server with retry logic.
 
@@ -915,14 +914,13 @@ class UPSRSClient:
             success_code: Expected HTTP status code for success
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         retry_count = 0
         while retry_count <= self.max_retries:
             try:
-                response = self.session.request(
-                    method, url, headers=headers, json=json_data, timeout=self.timeout
-                )
+                response = self.session.request(method, url, headers=headers, json=json_data, timeout=self.timeout)
 
                 # Check for warning headers
                 warning_header = response.headers.get("Warning")
@@ -934,29 +932,22 @@ class UPSRSClient:
                     self.logger.info(f"Request to {url} successful")
 
                     try:
-                        result = (
-                            response.json() if response.text else {"status": "Success"}
-                        )
+                        result = response.json() if response.text else {"status": "Success"}
                     except json.JSONDecodeError:
                         result = {"status": "Success", "response_text": response.text}
 
                     # Add headers of interest
                     for header in ["Content-Location", "Location", "Warning"]:
-                        if header.lower() in response.headers:
-                            result[header.lower().replace("-", "_")] = response.headers[
-                                header
-                            ]
+                        header_lower = header.lower()
+                        if header_lower in response.headers:
+                            result[header_lower.replace("-", "_")] = response.headers.get(header_lower)
 
                     return True, result
 
                 # Handle no content (204) and partial content (206) specially
-                elif response.status_code in [204, 206]:
+                elif response.status_code == 204:
                     result = {"status_code": response.status_code}
-                    if response.status_code == 204:
-                        result["message"] = "No Content"
-                    else:
-                        result["message"] = "Partial Content"
-
+                    result["message"] = "No Content"
                     try:
                         if response.text:
                             result["data"] = response.json()
@@ -964,40 +955,60 @@ class UPSRSClient:
                         pass
 
                     return True, result
+                # For partial content (status code 206)
+                elif response.status_code == 206:
+                    try:
+                        # Parse the JSON response
+                        result_list = response.json()
+
+                        # Log warning about partial results
+                        self.logger.info("Partial results received. There may be more results available.")
+                        if "Warning" in response.headers:
+                            self.logger.warning(f"Server warning: {response.headers['Warning']}")
+
+                        # Return just the list of results (to match 200 OK behavior)
+                        return True, result_list
+                    except json.JSONDecodeError:
+                        # Handle parsing error
+                        return False, "Failed to parse partial content response"
 
                 else:
-                    error_msg = (
-                        f"Failed request to {url}. Status code: {response.status_code}"
-                    )
+                    error_msg = f"Failed request to {url}. Status code: {response.status_code}"
                     if response.text:
                         try:
-                            error_data = response.json()
-                            error_msg = f"{error_msg}, Error: {json.dumps(error_data)}"
+                            error_details = response.json() if response.text else {}
+                            if error_details:
+                                error_msg += f". Error details: {error_details}"
+                            else:
+                                error_msg += f". Response: {response.text}"
+                            # return False, error_msg
                         except json.JSONDecodeError:
                             error_msg = f"{error_msg}, Response: {response.text}"
+                            #  return False, error_msg
+                        except ValueError:
+                            # Handle case where error response is not JSON
+                            error_msg = (
+                                f"Failed request to {url}. Status code: {response.status_code}. Response: {response.text}"
+                            )
+                        # return False, error_msg
 
                     if warning_header:
                         error_msg = f"{error_msg}, Warning: {warning_header}"
 
                     # Don't retry client errors except timeout (408) and too many requests (429)
-                    if (
-                        400 <= response.status_code < 500
-                        and response.status_code not in [408, 429]
-                    ):
+                    if 400 <= response.status_code < 500 and response.status_code not in [408, 429]:
                         self.logger.error(error_msg)
                         return False, error_msg
 
                     # For other errors, retry if we haven't exceeded max retries
                     if retry_count < self.max_retries:
                         retry_count += 1
-                        self.logger.warning(
-                            f"{error_msg}. Retrying ({retry_count}/{self.max_retries})..."
-                        )
-                        time.sleep(
-                            self.retry_delay * retry_count
-                        )  # Exponential backoff
+                        self.logger.warning(f"{error_msg}. Retrying ({retry_count}/{self.max_retries})...")
+                        time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                        continue
                     else:
-                        self.logger.error(f"{error_msg}. Max retries exceeded.")
+                        error_msg = f"{error_msg}. Max retries exceeded."
+                        self.logger.error(f"{error_msg}")
                         return False, error_msg
 
             except requests.RequestException as e:
@@ -1005,20 +1016,18 @@ class UPSRSClient:
 
                 if retry_count < self.max_retries:
                     retry_count += 1
-                    self.logger.warning(
-                        f"{error_msg}. Retrying ({retry_count}/{self.max_retries})..."
-                    )
+                    self.logger.warning(f"{error_msg}. Retrying ({retry_count}/{self.max_retries})...")
                     time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                    continue
                 else:
-                    self.logger.error(f"{error_msg}. Max retries exceeded.")
+                    error_msg = f"{error_msg}. Max retries exceeded."
+                    self.logger.error(f"{error_msg}")
                     return False, error_msg
 
         # This should not be reached, but just in case
         return False, "Unknown error occurred during request"
 
-    def _send_subscription_request(
-        self, endpoint: str
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def _send_subscription_request(self, endpoint: str) -> tuple[bool, dict[str, Any] | str]:
         """
         Send a subscription request to the server.
 
@@ -1026,7 +1035,8 @@ class UPSRSClient:
             endpoint: The complete endpoint URL including query parameters
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         success, response = self._send_request("POST", endpoint, success_code=201)
 
@@ -1040,9 +1050,7 @@ class UPSRSClient:
 
         return success, response
 
-    def _send_unsubscription_request(
-        self, endpoint: str
-    ) -> Tuple[bool, Union[Dict[str, Any], str]]:
+    def _send_unsubscription_request(self, endpoint: str) -> tuple[bool, dict[str, Any] | str]:
         """
         Send an unsubscription request to the server.
 
@@ -1050,7 +1058,8 @@ class UPSRSClient:
             endpoint: The complete endpoint URL including query parameters
 
         Returns:
-            Tuple containing success status and either the response data or error message
+            tuple containing success status and either the response data or error message
+
         """
         return self._send_request("DELETE", endpoint)
 
@@ -1076,6 +1085,7 @@ class UPSRSClient:
 
         Args:
             message: The received message in DICOM+JSON format
+
         """
         try:
             event_data = json.loads(message)
@@ -1085,16 +1095,10 @@ class UPSRSClient:
             ds = Dataset.from_json(message)
 
             # Log the relevant DICOM attributes from the event
-            affected_sop_instance_uid = (
-                ds.AffectedSOPInstanceUID
-                if hasattr(ds, "AffectedSOPInstanceUID")
-                else "Unknown"
-            )
+            affected_sop_instance_uid = ds.AffectedSOPInstanceUID if hasattr(ds, "AffectedSOPInstanceUID") else "Unknown"
             event_type_id = ds.EventTypeID if hasattr(ds, "EventTypeID") else "Unknown"
 
-            self.logger.info(
-                f"UPS Event Type: {event_type_id} with Affected SOP Instance UID: {affected_sop_instance_uid}"
-            )
+            self.logger.info(f"UPS Event Type: {event_type_id} with Affected SOP Instance UID: {affected_sop_instance_uid}")
 
             # Call user-provided event callback if it exists
             if self.event_callback:
@@ -1103,13 +1107,9 @@ class UPSRSClient:
                     self.event_callback(event_data)
                 else:
                     # Schedule the callback to run in the main thread
-                    threading.Thread(
-                        target=self.event_callback, args=(event_data,)
-                    ).start()
+                    threading.Thread(target=self.event_callback, args=(event_data,)).start()
             else:
-                self.logger.warning(
-                    "No event_callback assigned.  Check application level call to connect_websocket"
-                )
+                self.logger.warning("No event_callback assigned.  Check application level call to connect_websocket")
 
         except json.JSONDecodeError:
             self.logger.error(f"Failed to parse message as JSON: {message}")
@@ -1155,15 +1155,11 @@ class UPSRSClient:
                 self.logger.error(f"WebSocket connection error: {str(e)}")
 
                 if retry_count >= max_retries:
-                    self.logger.error(
-                        f"Maximum retries ({max_retries}) reached. Giving up."
-                    )
+                    self.logger.error(f"Maximum retries ({max_retries}) reached. Giving up.")
                     self.running = False
                     break
 
-                self.logger.info(
-                    f"Attempting to reconnect in {retry_delay} seconds... (Attempt {retry_count}/{max_retries})"
-                )
+                self.logger.info(f"Attempting to reconnect in {retry_delay} seconds... (Attempt {retry_count}/{max_retries})")
                 await asyncio.sleep(retry_delay)
 
                 # Exponential backoff for retry delay (capped at 60 seconds)
@@ -1172,9 +1168,7 @@ class UPSRSClient:
             except Exception as e:
                 self.logger.error(f"Unexpected error: {str(e)}")
                 if self.running:
-                    self.logger.info(
-                        f"Attempting to reconnect in {retry_delay} seconds..."
-                    )
+                    self.logger.info(f"Attempting to reconnect in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
                 else:
                     break
@@ -1183,21 +1177,18 @@ class UPSRSClient:
         self.logger.info("WebSocket client stopped")
 
 
-def _event_handler(event_data: Dict[str, Any]) -> None:
+def _event_handler(event_data: dict[str, Any]) -> None:
     """
     Handle incoming UPS-RS events.
 
     Args:
-        event_data: Dictionary containing event information
+        event_data: dictionary containing event information
+
     """
     try:
         event_type_id = event_data.get("00001002", {}).get("Value", ["unknown"])[0]
-        affected_sop_instance_uid = event_data.get("00001000", {}).get(
-            "Value", ["unknown"]
-        )[0]
-        print(
-            f"\nEVENT RECEIVED: {event_type_id} - Workitem: {affected_sop_instance_uid}"
-        )
+        affected_sop_instance_uid = event_data.get("00001000", {}).get("Value", ["unknown"])[0]
+        print(f"\nEVENT RECEIVED: {event_type_id} - Workitem: {affected_sop_instance_uid}")
     except (KeyError, IndexError):
         print("\nEVENT RECEIVED: (unable to extract event type or workitem UID)")
 
@@ -1206,7 +1197,7 @@ def _event_handler(event_data: Dict[str, Any]) -> None:
 
 
 def main() -> None:
-    """Main CLI entry point for UPS-RS client."""
+    """Execute Main CLI entry point for UPS-RS client."""
     parser = argparse.ArgumentParser(description="DICOM UPS-RS Client")
     parser.add_argument(
         "--server",
@@ -1219,30 +1210,18 @@ def main() -> None:
         type=str,
         help="Application Entity Title for subscription operations",
     )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose logging"
-    )
-    parser.add_argument(
-        "--timeout", type=int, default=30, help="Request timeout in seconds"
-    )
-    parser.add_argument(
-        "--max-retries", type=int, default=3, help="Maximum number of request retries"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
+    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of request retries")
 
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     # Create workitem command
     create_parser = subparsers.add_parser("create", help="Create a new workitem")
-    create_parser.add_argument(
-        "--workitem-uid", type=str, help="Optional UID for the workitem"
-    )
-    create_parser.add_argument(
-        "--input-file", type=str, help="JSON file containing workitem data"
-    )
-    create_parser.add_argument(
-        "--input-dcm", type=str, help="DICOM file containing workitem data"
-    )
+    create_parser.add_argument("--workitem-uid", type=str, help="Optional UID for the workitem")
+    create_parser.add_argument("--input-file", type=str, help="JSON file containing workitem data")
+    create_parser.add_argument("--input-dcm", type=str, help="DICOM file containing workitem data")
 
     # Retrieve workitem command
     retrieve_parser = subparsers.add_parser("retrieve", help="Retrieve a workitem")
@@ -1272,9 +1251,7 @@ def main() -> None:
         help="Fields to include in results",
         default=[],
     )
-    search_parser.add_argument(
-        "--fuzzy", action="store_true", help="Enable fuzzy matching"
-    )
+    search_parser.add_argument("--fuzzy", action="store_true", help="Enable fuzzy matching")
     search_parser.add_argument(
         "--state",
         choices=["SCHEDULED", "IN PROGRESS", "CANCELED", "COMPLETED"],
@@ -1290,24 +1267,12 @@ def main() -> None:
         type=str,
         help="Filter by Scheduled Start Date (00404005) in YYYYMMDD format",
     )
-    search_parser.add_argument(
-        "--label", type=str, help="Filter by Procedure Step Label (00741204)"
-    )
-    search_parser.add_argument(
-        "--offset", type=int, default=0, help="Starting position of results"
-    )
-    search_parser.add_argument(
-        "--limit", type=int, help="Maximum number of results to return"
-    )
-    search_parser.add_argument(
-        "--no-cache", action="store_true", help="Request non-cached results"
-    )
-    search_parser.add_argument(
-        "--output-file", type=str, help="Output file to save search results"
-    )
-    search_parser.add_argument(
-        "--summary", action="store_true", help="Display only a summary of results"
-    )
+    search_parser.add_argument("--label", type=str, help="Filter by Procedure Step Label (00741204)")
+    search_parser.add_argument("--offset", type=int, default=0, help="Starting position of results")
+    search_parser.add_argument("--limit", type=int, help="Maximum number of results to return")
+    search_parser.add_argument("--no-cache", action="store_true", help="Request non-cached results")
+    search_parser.add_argument("--output-file", type=str, help="Output file to save search results")
+    search_parser.add_argument("--summary", action="store_true", help="Display only a summary of results")
     search_parser.add_argument(
         "--display-fields",
         type=str,
@@ -1316,16 +1281,10 @@ def main() -> None:
 
     # Update workitem command
     update_parser = subparsers.add_parser("update", help="Update a workitem")
-    update_parser.add_argument(
-        "--workitem-uid", type=str, required=True, help="UID of the workitem to update"
-    )
+    update_parser.add_argument("--workitem-uid", type=str, required=True, help="UID of the workitem to update")
     update_parser.add_argument("--transaction-uid", type=str, help="Transaction UID")
-    update_parser.add_argument(
-        "--input-file", type=str, help="JSON file containing update data"
-    )
-    update_parser.add_argument(
-        "--procedure-label", type=str, help="Set the Procedure Step Label (0074,1204)"
-    )
+    update_parser.add_argument("--input-file", type=str, help="JSON file containing update data")
+    update_parser.add_argument("--procedure-label", type=str, help="Set the Procedure Step Label (0074,1204)")
     update_parser.add_argument(
         "--procedure-description",
         type=str,
@@ -1354,21 +1313,15 @@ def main() -> None:
     )
 
     # Request cancellation command
-    cancel_parser = subparsers.add_parser(
-        "request-cancel", help="Request cancellation of a workitem"
-    )
+    cancel_parser = subparsers.add_parser("request-cancel", help="Request cancellation of a workitem")
     cancel_parser.add_argument(
         "--workitem-uid",
         type=str,
         required=True,
         help="UID of the workitem to request cancellation for",
     )
-    cancel_parser.add_argument(
-        "--reason", type=str, help="Reason for the cancellation request"
-    )
-    cancel_parser.add_argument(
-        "--contact-name", type=str, help="Display name of the contact person"
-    )
+    cancel_parser.add_argument("--reason", type=str, help="Reason for the cancellation request")
+    cancel_parser.add_argument("--contact-name", type=str, help="Display name of the contact person")
     cancel_parser.add_argument(
         "--contact-uri",
         type=str,
@@ -1376,21 +1329,15 @@ def main() -> None:
     )
 
     # Subscribe command
-    subscribe_parser = subparsers.add_parser(
-        "subscribe", help="Subscribe to workitem events"
-    )
+    subscribe_parser = subparsers.add_parser("subscribe", help="Subscribe to workitem events")
     subscribe_group = subscribe_parser.add_mutually_exclusive_group(required=True)
-    subscribe_group.add_argument(
-        "--worklist", action="store_true", help="Subscribe to the entire worklist"
-    )
+    subscribe_group.add_argument("--worklist", action="store_true", help="Subscribe to the entire worklist")
     subscribe_group.add_argument(
         "--filtered-worklist",
         action="store_true",
         help="Subscribe to a filtered worklist",
     )
-    subscribe_group.add_argument(
-        "--workitem", type=str, help="UID of a specific workitem to subscribe to"
-    )
+    subscribe_group.add_argument("--workitem", type=str, help="UID of a specific workitem to subscribe to")
     subscribe_parser.add_argument(
         "--filter",
         action="append",
@@ -1409,21 +1356,15 @@ def main() -> None:
     )
 
     # Unsubscribe command
-    unsubscribe_parser = subparsers.add_parser(
-        "unsubscribe", help="Unsubscribe from workitem events"
-    )
+    unsubscribe_parser = subparsers.add_parser("unsubscribe", help="Unsubscribe from workitem events")
     unsubscribe_group = unsubscribe_parser.add_mutually_exclusive_group(required=True)
-    unsubscribe_group.add_argument(
-        "--worklist", action="store_true", help="Unsubscribe from the entire worklist"
-    )
+    unsubscribe_group.add_argument("--worklist", action="store_true", help="Unsubscribe from the entire worklist")
     unsubscribe_group.add_argument(
         "--filtered-worklist",
         action="store_true",
         help="Unsubscribe from a filtered worklist",
     )
-    unsubscribe_group.add_argument(
-        "--workitem", type=str, help="UID of a specific workitem to unsubscribe from"
-    )
+    unsubscribe_group.add_argument("--workitem", type=str, help="UID of a specific workitem to unsubscribe from")
     unsubscribe_parser.add_argument(
         "--filter",
         action="append",
@@ -1440,9 +1381,7 @@ def main() -> None:
 
     # Set up logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
     # Check for required command
     if not args.command:
@@ -1489,12 +1428,10 @@ def _handle_create_command(client: UPSRSClient, args: argparse.Namespace) -> Non
     workitem_data = None
     if args.input_file:
         try:
-            with open(args.input_file, "r") as f:
+            with open(args.input_file) as f:
                 workitem_data = json.load(f)
         except Exception as e:
-            logging.error(
-                f"Failed to load workitem data from {args.input_file}: {str(e)}"
-            )
+            logging.error(f"Failed to load workitem data from {args.input_file}: {str(e)}")
             sys.exit(1)
 
     if args.input_dcm:
@@ -1514,9 +1451,7 @@ def _handle_create_command(client: UPSRSClient, args: argparse.Namespace) -> Non
             local_json_path.write_text(json.dumps(workitem_data, indent=2))
 
         except Exception as e:
-            logging.error(
-                f"Failed to load workitem data from {args.input_dcm}: {str(e)}"
-            )
+            logging.error(f"Failed to load workitem data from {args.input_dcm}: {str(e)}")
             sys.exit(1)
 
     # Create workitem
@@ -1625,7 +1560,7 @@ def _handle_search_command(client: UPSRSClient, args: argparse.Namespace) -> Non
     sys.exit(0)
 
 
-def _summarize_search_criteria(match_parameters: Dict[str, str]) -> None:
+def _summarize_search_criteria(match_parameters: dict[str, str]) -> None:
     """Print a summary of the search criteria."""
     if match_parameters:
         print("Searching with criteria:")
@@ -1648,9 +1583,7 @@ def _summarize_search_criteria(match_parameters: Dict[str, str]) -> None:
         print("Searching with no criteria (will return all workitems)")
 
 
-def _summarize_search_results(
-    args: argparse.Namespace, response: List[Dict[str, Any]]
-) -> None:
+def _summarize_search_results(args: argparse.Namespace, response: list[dict[str, Any]]) -> None:
     """Print a summary of the search results."""
     print("\nSummary of Workitems:")
     print("-" * 80)
@@ -1658,9 +1591,7 @@ def _summarize_search_results(
     # Determine which fields to display in summary
     display_fields = []
     display_fields = (
-        args.display_fields.split(",")
-        if args.display_fields
-        else ["00080018", "00741000", "00404041", "00741204"]
+        args.display_fields.split(",") if args.display_fields else ["00080018", "00741000", "00404041", "00741204"]
     )
     # Print header
     header_row = []
@@ -1707,12 +1638,10 @@ def _handle_update_command(client: UPSRSClient, args: argparse.Namespace) -> Non
     # Load from file if provided
     if args.input_file:
         try:
-            with open(args.input_file, "r") as f:
+            with open(args.input_file) as f:
                 update_data = json.load(f)
         except Exception as e:
-            logging.error(
-                f"Failed to load update data from {args.input_file}: {str(e)}"
-            )
+            logging.error(f"Failed to load update data from {args.input_file}: {str(e)}")
             sys.exit(1)
 
     # Add command line attributes if provided
@@ -1727,15 +1656,11 @@ def _handle_update_command(client: UPSRSClient, args: argparse.Namespace) -> Non
 
     # Ensure we have some update data
     if not update_data:
-        logging.error(
-            "No update data provided. Use --input-file or command line options."
-        )
+        logging.error("No update data provided. Use --input-file or command line options.")
         sys.exit(1)
 
     # Update workitem
-    success, response = client.update_workitem(
-        args.workitem_uid, args.transaction_uid, update_data
-    )
+    success, response = client.update_workitem(args.workitem_uid, args.transaction_uid, update_data)
 
     if success:
         print("Workitem updated successfully")
@@ -1758,9 +1683,7 @@ def _handle_update_command(client: UPSRSClient, args: argparse.Namespace) -> Non
 def _handle_change_state_command(client: UPSRSClient, args: argparse.Namespace) -> None:
     """Handle the change workitem state command."""
     # Change workitem state
-    success, response = client.change_workitem_state(
-        args.workitem_uid, args.state, args.transaction_uid
-    )
+    success, response = client.change_workitem_state(args.workitem_uid, args.state, args.transaction_uid)
 
     if success:
         print(f"Workitem state changed successfully to {args.state}")
@@ -1785,14 +1708,10 @@ def _handle_change_state_command(client: UPSRSClient, args: argparse.Namespace) 
         sys.exit(1)
 
 
-def _handle_cancel_request_command(
-    client: UPSRSClient, args: argparse.Namespace
-) -> None:
+def _handle_cancel_request_command(client: UPSRSClient, args: argparse.Namespace) -> None:
     """Handle the request cancellation command."""
     # Request cancellation
-    success, response = client.request_cancellation(
-        args.workitem_uid, args.reason, args.contact_name, args.contact_uri
-    )
+    success, response = client.request_cancellation(args.workitem_uid, args.reason, args.contact_name, args.contact_uri)
 
     if not success:
         print(f"Failed to request cancellation: {response}")
@@ -1810,9 +1729,7 @@ def _handle_cancel_request_command(
         print(json.dumps(response["response"], indent=2))
 
     # Include note about processing
-    print(
-        "\nNote: The cancellation request has been accepted by the server, but the workitem"
-    )
+    print("\nNote: The cancellation request has been accepted by the server, but the workitem")
     print("owner is not obliged to honor the request and may not receive notification.")
 
     sys.exit(0)
@@ -1837,24 +1754,16 @@ def _handle_subscribe_command(client: UPSRSClient, args: argparse.Namespace) -> 
                 key, value = param.split("=", 1)
                 filter_params[key] = value
             else:
-                logging.warning(
-                    f"Ignoring invalid filter parameter (missing '='): {param}"
-                )
+                logging.warning(f"Ignoring invalid filter parameter (missing '='): {param}")
 
         if not filter_params:
-            logging.error(
-                "Filtered worklist subscription requires at least one filter parameter"
-            )
+            logging.error("Filtered worklist subscription requires at least one filter parameter")
             sys.exit(1)
 
-        success, response = client.subscribe_to_filtered_worklist(
-            filter_params, args.deletion_lock
-        )
+        success, response = client.subscribe_to_filtered_worklist(filter_params, args.deletion_lock)
         subscription_type = "filtered worklist"
     else:  # workitem
-        success, response = client.subscribe_to_workitem(
-            args.workitem, args.deletion_lock
-        )
+        success, response = client.subscribe_to_workitem(args.workitem, args.deletion_lock)
         subscription_type = f"workitem {args.workitem}"
 
     if success:
@@ -1873,7 +1782,7 @@ def _handle_subscribe_command(client: UPSRSClient, args: argparse.Namespace) -> 
             print("\nStarting event monitoring. Press Ctrl+C to stop.")
 
             # Set up signal handler for graceful shutdown
-            def signal_handler(sig, frame):
+            def signal_handler(sig, frame) -> None:  # noqa: ANN001
                 print("\nShutting down...")
                 client.disconnect()
                 sys.exit(0)
@@ -1916,24 +1825,16 @@ def _handle_unsubscribe_command(client: UPSRSClient, args: argparse.Namespace) -
                 key, value = param.split("=", 1)
                 filter_params[key] = value
             else:
-                logging.warning(
-                    f"Ignoring invalid filter parameter (missing '='): {param}"
-                )
+                logging.warning(f"Ignoring invalid filter parameter (missing '='): {param}")
 
         if not filter_params:
-            logging.error(
-                "Filtered worklist subscription requires at least one filter parameter"
-            )
+            logging.error("Filtered worklist subscription requires at least one filter parameter")
             sys.exit(1)
 
-        success, response = client.unsubscribe_from_filtered_worklist(
-            filter_params, args.deletion_lock
-        )
+        success, response = client.unsubscribe_from_filtered_worklist(filter_params, args.deletion_lock)
         subscription_type = "filtered worklist"
     else:  # workitem
-        success, response = client.unsubscribe_from_workitem(
-            args.workitem, args.deletion_lock
-        )
+        success, response = client.unsubscribe_from_workitem(args.workitem, args.deletion_lock)
         subscription_type = f"workitem {args.workitem}"
 
     if success:
