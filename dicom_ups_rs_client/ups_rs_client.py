@@ -693,9 +693,12 @@ class UPSRSClient:
             if loop.is_running():
                 asyncio.create_task(self.ws_connection.close())
             else:
-                # If no event loop is running in this thread, we need another approach
-                # This might be necessary if disconnect() is called from a different thread
-                pass
+                # If no event loop is running in this thread, we need another approach.
+                # This might be necessary if disconnect() is called from a different thread.
+                self.logger.warning("No running event loop found; attempting synchronous close of WebSocket.")
+                new_loop = asyncio.new_event_loop()
+                new_loop.run_until_complete(self.ws_connection.close())
+                new_loop.close()
             # Reset the connection reference immediately
             self.ws_connection = None
 
