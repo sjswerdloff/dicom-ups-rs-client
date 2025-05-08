@@ -240,9 +240,7 @@ class MockWebSocket:
             raise websockets.exceptions.ConnectionClosedError(1006, "Connection closed while waiting for message")
 
         event = self.events.pop(0)
-        if isinstance(event, dict):
-            return json.dumps(event)
-        return event
+        return json.dumps(event) if isinstance(event, dict) else event
 
     async def send(self, message: str) -> None:
         """
