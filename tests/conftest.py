@@ -104,109 +104,67 @@ class MockResponse:
 
 
 class MockSession:
-    """Mock for requests.Session with configurable responses."""
+    """Mock session for testing HTTP clients."""
 
     def __init__(self) -> None:
-        """Initialize the mock session with empty response mappings."""
-        self.responses: dict[str, list[MockResponse]] = {}
-        self.requests: list[dict[str, Any]] = []
-        self.expected_auth = None
-        self.cookies = {}
-        self.headers = CaseInsensitiveDict()
-        self.verify = True
-        self.cert = None
-        self.proxies = {}
-        self.hooks = {"response": []}
+        """Initialize the mock session."""
+        self.requests = []
+        self.responses = {}  # Will store responses by exact URL
+        self.pattern_responses = {}  # Will store responses by pattern
 
-    def add_response(self, method: str, url_pattern: str, response: MockResponse) -> None:
+    def add_response(self, method: str, url_pattern: str, response: "MockResponse", exact_match: bool = False) -> None:
         """
-        Add a response for a specific method and URL pattern.
+        Add a response for a given request pattern.
 
         Args:
-            method: HTTP method (GET, POST, PUT, DELETE)
-            url_pattern: Regex pattern to match URLs
-            response: MockResponse to return when matched
+            method: HTTP method (GET, POST, etc.)
+            url_pattern: URL pattern to match
+            response: Response to return
+            exact_match: If True, match the URL exactly; if False, use regex pattern matching
 
         """
-        key = f"{method}:{url_pattern}"
-        if key not in self.responses:
-            self.responses[key] = []
-        self.responses[key].append(response)
+        key = f"{method.upper()}:{url_pattern}"
 
-    def request(
-        self,
-        method: str,
-        url: str,
-        headers: dict[str, str] | None = None,
-        json: Any = None,  # noqa: ANN401
-        data: Any = None,  # noqa: ANN401
-        params: dict[str, str] | None = None,
-        auth: tuple[str, str] | None = None,
-        timeout: int | float | tuple | None = None,
-        allow_redirects: bool = True,
-        verify: bool | str = True,
-        stream: bool = False,
-        cert: str | tuple | None = None,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> MockResponse:
+        if exact_match:
+            # Store by exact URL for precise matching
+            if key not in self.responses:
+                self.responses[key] = []
+            self.responses[key].append(response)
+        else:
+            # Store by pattern for regex matching
+            if key not in self.pattern_responses:
+                self.pattern_responses[key] = []
+            self.pattern_responses[key].append(response)
+
+    def request(self, method: str, url: str, **kwargs: dict[str, any]) -> "MockResponse":
         """
         Mock the requests.Session.request method.
 
         Args:
-            method: HTTP method
-            url: Request URL
-            headers: Request headers
-            json: JSON payload
-            data: Request body
-            params: URL parameters
-            auth: Authentication tuple
-            timeout: Request timeout
-            allow_redirects: Whether to follow redirects
-            verify: SSL verification
-            stream: Whether to stream the response
-            cert: SSL client certificate
-            **kwargs: Additional keyword arguments
+            method: HTTP method (GET, POST, etc.)
+            url: URL to request
+            **kwargs: Additional arguments
 
         Returns:
-            A MockResponse object based on the request
-
-        Raises:
-            ConnectionError: If configured to simulate connection failures
-            Timeout: If configured to simulate timeouts
+            MockResponse: The response for the request
 
         """
         # Store the request for later inspection
-        self.requests.append(
-            {
-                "method": method,
-                "url": url,
-                "headers": headers,
-                "json": json,
-                "data": data,
-                "params": params,
-                "auth": auth,
-                "timeout": timeout,
-                "allow_redirects": allow_redirects,
-                "verify": verify,
-                "stream": stream,
-                "cert": cert,
-                **kwargs,
-            }
-        )
+        self.requests.append({"method": method, "url": url, **kwargs})
 
-        # Find a matching response based on method and URL pattern
-        for key, responses in list(self.responses.items()):  # Create a copy of the dict items
+        # Try exact match first (most specific)
+        exact_key = f"{method.upper()}:{url}"
+        if exact_key in self.responses and self.responses[exact_key]:
+            response = self.responses[exact_key].pop(0)
+            response.request = self.requests[-1]
+            return response
+
+        # Fall back to pattern matching
+        for key, responses in list(self.pattern_responses.items()):
             key_method, url_pattern = key.split(":", 1)
             if method.upper() == key_method.upper() and re.match(url_pattern, url):
                 if responses:
-                    # Get the first response
-                    response = responses.pop(0)  # Remove it from the list
-
-                    # If the list is now empty, remove the key
-                    if not responses:
-                        del self.responses[key]
-
-                    # Set the request on the response
+                    response = responses.pop(0)
                     response.request = self.requests[-1]
                     return response
 
@@ -214,35 +172,6 @@ class MockSession:
         return MockResponse(
             status_code=404, text=f"No mock response configured for {method} {url}", reason="Not Found", url=url
         )
-
-    # Implement convenience methods that mirror requests.Session
-    def get(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """GET requests."""
-        return self.request("GET", url, **kwargs)
-
-    def post(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """POST requests."""
-        return self.request("POST", url, **kwargs)
-
-    def put(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """Do PUT requests."""
-        return self.request("PUT", url, **kwargs)
-
-    def delete(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """DELETE requests."""
-        return self.request("DELETE", url, **kwargs)
-
-    def head(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """HEAD requests."""
-        return self.request("HEAD", url, **kwargs)
-
-    def patch(self, url: str, **kwargs: dict[str, Any]) -> MockResponse:
-        """PATCH requests."""
-        return self.request("PATCH", url, **kwargs)
-
-    def close(self) -> None:
-        """Close the session."""
-        pass
 
 
 class MockWebSocket:
@@ -561,3 +490,55 @@ def response_factory() -> Callable[..., MockResponse]:
         return MockResponse(status_code=status_code, json_data=json_data, text=text, headers=headers or {}, reason=reason)
 
     return create_response
+
+
+@pytest.fixture
+def mock_websocket() -> MockWebSocket:
+    """Create a basic mock WebSocket for testing."""
+    return MockWebSocket()
+
+
+@pytest.fixture
+def mock_websocket_with_events(sample_event_notification: dict[str, Any]) -> MockWebSocket:
+    """Create a mock WebSocket with the sample event notification."""
+    ws = MockWebSocket()
+    ws.add_event(sample_event_notification)
+    return ws
+
+
+@pytest.fixture
+def websocket_connect_patch():  # noqa: ANN201
+    """Patch websockets.connect to return a mock websocket."""
+    mock_ws = MockWebSocket()
+
+    # Create a function that matches the signature of websockets.connect
+    # but immediately returns the mock (not a coroutine)
+    def mock_connect(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        # This is important: return the mock directly, not as a coroutine
+        # This avoids the need for awaiting
+        return mock_ws
+
+    # Patch the websockets.connect function
+    with patch("websockets.connect", mock_connect) as patched:
+        # Store the mock_websocket for easy access in tests
+        patched.mock_websocket = mock_ws
+        yield patched
+
+
+@pytest.fixture
+def websocket_with_events():  # noqa: ANN201
+    """Create a fixture that provides a WebSocket with multiple events."""
+
+    def _create_websocket_with_events(events):  # noqa: ANN001, ANN202
+        """Create a MockWebSocket with the specified events."""
+        mock_ws = MockWebSocket()
+        for event in events:
+            mock_ws.add_event(event)
+
+        # Create a websockets.connect mock function
+        def mock_connect(*args: tuple, **kwargs: dict[str, any]) -> MockWebSocket:
+            return mock_ws
+
+        return mock_connect, mock_ws
+
+    return _create_websocket_with_events

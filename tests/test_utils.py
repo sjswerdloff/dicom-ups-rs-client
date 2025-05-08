@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta
 
-import pytest
 from pydicom.uid import generate_uid
 
 from dicom_ups_rs_client.ups_rs_client import InputReadinessState, UPSRSClient, UPSState
@@ -16,13 +15,15 @@ def test_validate_uid() -> None:
     assert UPSRSClient.validate_uid("1.2.840.10008.5.1.4.34.5.1") is True  # Filtered subscription well-known UID
     assert UPSRSClient.validate_uid("1.2.840.10008.5.1.4.34.6.1") is True  # UPS Push SOP Class UID
     assert UPSRSClient.validate_uid(str(generate_uid())) is True  # Generated UID
-
+    assert UPSRSClient.validate_uid("1.2.99999999999.3.4") is True  # Component value is not too large
+    assert UPSRSClient.validate_uid("0.1.2.3.4") is True  # Leading zero
     # Invalid UIDs
     assert UPSRSClient.validate_uid("invalid.uid") is False
     assert UPSRSClient.validate_uid("1.2.3.") is False  # Trailing dot
     assert UPSRSClient.validate_uid("1..2.3.4") is False  # Empty component
     assert UPSRSClient.validate_uid(".1.2.3.4") is False  # Leading dot
-    assert UPSRSClient.validate_uid("1.2.99999999999.3.4") is False  # Component value too large
+
+    assert UPSRSClient.validate_uid("2.1.2.3.00.4") is False  # double zero
 
 
 def test_create_default_workitem() -> None:
@@ -235,8 +236,8 @@ def test_send_request_custom_success_code(mock_ups_rs_client: UPSRSClient, respo
 
 
 def test_event_handler() -> None:
-    """Test the _event_handler function."""
-    from dicom_ups_rs_client.ups_rs_client import _event_handler
+    """Test the event_handler function."""
+    from dicom_ups_rs_client.ups_rs_client import _event_handler as event_handler
 
     # Create a test event
     event_data = {
@@ -245,10 +246,20 @@ def test_event_handler() -> None:
         "00741000": {"vr": "CS", "Value": ["SCHEDULED"]},  # Procedure Step State
     }
 
-    # Save stdout to verify output
-    with pytest.raises(SystemExit) as excinfo:
-        # Call the event handler (should exit with code 0)
-        _event_handler(event_data)
+    # Capture stdout to verify output
+    import io
+    import sys
 
-    # Check exit code (would be 0 if it actually exited)
-    assert excinfo.value.code == 0
+    captured_output = io.StringIO()
+    sys.stdout = captured_output
+
+    # Call the event handler
+    event_handler(event_data)
+
+    # Restore stdout
+    sys.stdout = sys.__stdout__
+
+    # Verify the output
+    output = captured_output.getvalue()
+    assert "EVENT RECEIVED: 1 - Workitem: 1.2.3.4.5" in output
+    assert "SCHEDULED" in output

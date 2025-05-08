@@ -686,6 +686,18 @@ class UPSRSClient:
         self.logger.info("Disconnecting from WebSocket...")
         self.running = False
 
+        # Actively close the WebSocket connection to interrupt recv()
+        if self.ws_connection:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.ws_connection.close())
+            else:
+                # If no event loop is running in this thread, we need another approach
+                # This might be necessary if disconnect() is called from a different thread
+                pass
+            # Reset the connection reference immediately
+            self.ws_connection = None
+
         # The actual connection will be closed in the WebSocket thread
         # when it detects that self.running is False
 
@@ -1138,12 +1150,20 @@ class UPSRSClient:
                     # Keep receiving messages until connection is closed
                     while self.running:
                         try:
-                            message = await websocket.recv()
+                            message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                             await self._handle_message(message)
+                        except TimeoutError:
+                            # No message received within timeout, check if we should continue
+                            if not self.running:
+                                # Exit the inner loop immediately if shutdown was requested
+                                break
+                            continue
                         except websockets.exceptions.ConnectionClosed as e:
                             self.logger.warning(f"WebSocket connection closed: {e}")
                             break
-
+                # Check running flag again after inner loop ends
+                if not self.running:
+                    break
             except (
                 websockets.exceptions.WebSocketException,
                 ConnectionRefusedError,
