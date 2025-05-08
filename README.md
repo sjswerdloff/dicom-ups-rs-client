@@ -147,7 +147,7 @@ Run `ups-rs-client --help` to see all available commands and options.
 
 ## License
 
-MIT License
+Apache2 License
 
 ## Contributing
 
