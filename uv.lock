@@ -135,7 +135,7 @@ toml = [
 [[package]]
 name = "dicom-ups-rs-client"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "pydicom" },
     { name = "requests" },

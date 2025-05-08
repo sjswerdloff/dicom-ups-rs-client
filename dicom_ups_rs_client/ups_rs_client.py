@@ -233,11 +233,11 @@ class UPSRSClient:
 
     def search_workitems(
         self,
-        match_parameters: Dict[str, str],
-        include_fields: Optional[List[str]] = None,
+        match_parameters: dict[str, str],
+        include_fields: list[str] | None = None,
         fuzzy_matching: bool = False,
         offset: int = 0,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         no_cache: bool = False,
     ) -> Tuple[bool, Union[List[Dict[str, Any]], str]]:
         """
