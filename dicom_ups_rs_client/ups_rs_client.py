@@ -147,13 +147,12 @@ class UPSRSClient:
         self.client_cert = client_cert
         # Validate client_cert tuple shape early
         if self.client_cert is not None:
-            if not (isinstance(self.client_cert, tuple)
-                    and len(self.client_cert) == 2
-                    and all(isinstance(path, str) for path in self.client_cert)):
-                raise ValueError(
-                    "client_cert must be a two-element tuple of strings "
-                    "(cert_file, key_file)"
-                )
+            if not (
+                isinstance(self.client_cert, tuple)
+                and len(self.client_cert) == 2
+                and all(isinstance(path, str) for path in self.client_cert)
+            ):
+                raise ValueError("client_cert must be a two-element tuple of strings (cert_file, key_file)")
         self.websocket_url_override = websocket_url_override
 
         # Set up logging
