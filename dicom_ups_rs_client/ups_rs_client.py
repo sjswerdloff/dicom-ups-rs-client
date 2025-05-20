@@ -1131,7 +1131,7 @@ class UPSRSClient:
         self.logger.info(f"endpoint {endpoint}")
         if success and isinstance(response, dict):
             for key, value in response.items():
-                self.logger.warning(f"{key}: {value}")
+                self.logger.debug(f"{key}: {value}")
 
             # Extract WebSocket URL from Content-Location header that has been
             # converted to lower case and snake_case in _send_request()
