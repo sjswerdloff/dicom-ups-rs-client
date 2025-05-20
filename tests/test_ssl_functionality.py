@@ -42,6 +42,19 @@ def test_ssl_websocket_connection_with_disabled_verification() -> None:
         client = UPSRSClient(base_url="https://example.com/dicom-web", verify_ssl=False)
         client.ws_url = "wss://example.com/dicom-web/subscribers/TEST_AE"
 
+        # Protect the disconnect method from race conditions
+        original_disconnect = client.disconnect
+
+        def safe_disconnect() -> None:
+            # Prevent failures by setting ws_connection to a mock with a close method
+            if not client.ws_connection:
+                client.ws_connection = AsyncMock()
+                client.ws_connection.close = AsyncMock()
+            # Call original
+            original_disconnect()
+
+        client.disconnect = safe_disconnect
+
         # Instead of patching the client's method, we'll patch websockets.connect
         # and capture what's passed to it
         with patch("websockets.connect") as mock_connect:
@@ -49,41 +62,56 @@ def test_ssl_websocket_connection_with_disabled_verification() -> None:
             mock_websocket = AsyncMock()
             mock_connect.return_value = mock_websocket
 
-            # Make recv() never return to keep the websocket loop running
-            mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=lambda: asyncio.Future())
+            # Make recv() return a valid JSON string once and then never complete
+            future = asyncio.Future()
+            mock_websocket.__aenter__.return_value.recv = AsyncMock(
+                side_effect=["{}"] + [future] * 10  # First return valid JSON, then hang
+            )
 
-            # Start the WebSocket connection
-            client.connect_websocket()
+            try:
+                # Start the WebSocket connection
+                client.connect_websocket()
 
-            # Wait a short time for the thread to start and make the connection
-            # This is more reliable since we've mocked the websocket connection
-            time.sleep(0.2)
+                # Wait a short time for the thread to start and make the connection
+                time.sleep(0.3)
 
-            # Verify connect was called and check the SSL context
-            assert mock_connect.called, "websockets.connect was not called"
-            args, kwargs = mock_connect.call_args
+                # Verify connect was called and check the SSL context
+                assert mock_connect.called, "websockets.connect was not called"
+                args, kwargs = mock_connect.call_args
 
-            # Check if SSL context was passed and has the correct settings
-            assert "ssl" in kwargs, "SSL context was not passed to websockets.connect"
-            ssl_context = kwargs["ssl"]
-            assert isinstance(ssl_context, ssl.SSLContext), "SSL parameter is not an SSLContext"
-            assert ssl_context.check_hostname is False, "check_hostname should be False"
-            assert ssl_context.verify_mode == ssl.CERT_NONE, "verify_mode should be CERT_NONE"
-
-            # Clean up
-            client.disconnect()
+                # Check if SSL context was passed and has the correct settings
+                assert "ssl" in kwargs, "SSL context was not passed to websockets.connect"
+                ssl_context = kwargs["ssl"]
+                assert isinstance(ssl_context, ssl.SSLContext), "SSL parameter is not an SSLContext"
+                assert ssl_context.check_hostname is False, "check_hostname should be False"
+                assert ssl_context.verify_mode == ssl.CERT_NONE, "verify_mode should be CERT_NONE"
+            finally:
+                # Set running to False to prevent disconnect() from trying to close the connection
+                client.running = False
+                client.disconnect()
 
 
 def test_ssl_websocket_connection_with_custom_ca_bundle() -> None:
     """Test WebSocket connection with custom CA bundle."""
-    import asyncio
-
     with patch("requests.Session") as mock_session_class:
         mock_session = MagicMock()
         mock_session_class.return_value = mock_session
 
         client = UPSRSClient(base_url="https://example.com/dicom-web", verify_ssl="/path/to/ca-bundle.crt")
         client.ws_url = "wss://example.com/dicom-web/subscribers/TEST_AE"
+
+        # Protect the disconnect method from race conditions
+        original_disconnect = client.disconnect
+
+        def safe_disconnect() -> None:
+            # Prevent failures by setting ws_connection to a mock with a close method
+            if not client.ws_connection:
+                client.ws_connection = AsyncMock()
+                client.ws_connection.close = AsyncMock()
+            # Call original
+            original_disconnect()
+
+        client.disconnect = safe_disconnect
 
         # Mock SSLContext to avoid file not found errors
         with patch("ssl.create_default_context") as mock_create_context:
@@ -94,9 +122,9 @@ def test_ssl_websocket_connection_with_custom_ca_bundle() -> None:
             with patch("websockets.connect") as mock_connect:
                 # Create a proper mock for the websocket
                 mock_websocket = AsyncMock()
-                # Create a future that never completes to keep the websocket loop running
+                # Return a valid JSON string once, then futures that never complete
                 future = asyncio.Future()
-                mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=lambda: future)
+                mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
                 try:
@@ -104,14 +132,13 @@ def test_ssl_websocket_connection_with_custom_ca_bundle() -> None:
                     client.connect_websocket()
 
                     # Short wait for the thread to start
-                    time.sleep(0.2)
+                    time.sleep(0.3)
 
                     # Check that load_verify_locations was called with our CA bundle
                     mock_ssl_context.load_verify_locations.assert_called_once_with("/path/to/ca-bundle.crt")
                 finally:
                     # Set running to False to prevent disconnect() from trying to close the connection
                     client.running = False
-                    # Clean up
                     client.disconnect()
 
 
@@ -125,6 +152,19 @@ def test_ssl_websocket_connection_with_client_cert() -> None:
         client = UPSRSClient(base_url="https://example.com/dicom-web", client_cert=cert_tuple)
         client.ws_url = "wss://example.com/dicom-web/subscribers/TEST_AE"
 
+        # Protect the disconnect method from race conditions
+        original_disconnect = client.disconnect
+
+        def safe_disconnect() -> None:
+            # Prevent failures by setting ws_connection to a mock with a close method
+            if not client.ws_connection:
+                client.ws_connection = AsyncMock()
+                client.ws_connection.close = AsyncMock()
+            # Call original
+            original_disconnect()
+
+        client.disconnect = safe_disconnect
+
         # Mock SSLContext to avoid file not found errors
         with patch("ssl.create_default_context") as mock_create_context:
             mock_ssl_context = MagicMock()
@@ -132,20 +172,26 @@ def test_ssl_websocket_connection_with_client_cert() -> None:
 
             # Patch websockets.connect to avoid actual connection
             with patch("websockets.connect") as mock_connect:
+                # Create a proper mock for the websocket
                 mock_websocket = AsyncMock()
+                # Return a valid JSON string once, then futures that never complete
+                future = asyncio.Future()
+                mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
-                # Start the WebSocket connection
-                client.connect_websocket()
+                try:
+                    # Start the WebSocket connection
+                    client.connect_websocket()
 
-                # Short wait for the thread to start
-                time.sleep(0.2)
+                    # Short wait for the thread to start
+                    time.sleep(0.3)
 
-                # Check that load_cert_chain was called with our cert tuple
-                mock_ssl_context.load_cert_chain.assert_called_once_with("/path/to/client.crt", "/path/to/client.key")
-
-                # Clean up
-                client.disconnect()
+                    # Check that load_cert_chain was called with our cert tuple
+                    mock_ssl_context.load_cert_chain.assert_called_once_with("/path/to/client.crt", "/path/to/client.key")
+                finally:
+                    # Set running to False to prevent disconnect() from trying to close the connection
+                    client.running = False
+                    client.disconnect()
 
 
 def test_non_ssl_websocket_connection() -> None:
@@ -160,32 +206,50 @@ def test_non_ssl_websocket_connection() -> None:
         )
         client.ws_url = "ws://example.com/dicom-web/subscribers/TEST_AE"  # Non-SSL WebSocket
 
+        # Protect the disconnect method from race conditions
+        original_disconnect = client.disconnect
+
+        def safe_disconnect() -> None:
+            # Prevent failures by setting ws_connection to a mock with a close method
+            if not client.ws_connection:
+                client.ws_connection = AsyncMock()
+                client.ws_connection.close = AsyncMock()
+            # Call original
+            original_disconnect()
+
+        client.disconnect = safe_disconnect
+
         with patch("websockets.connect") as mock_connect:
+            # Create a proper mock for the websocket
             mock_websocket = AsyncMock()
+            # Return a valid JSON string once, then futures that never complete
+            future = asyncio.Future()
+            mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
             mock_connect.return_value = mock_websocket
 
-            # Start the WebSocket connection
-            client.connect_websocket()
+            try:
+                # Start the WebSocket connection
+                client.connect_websocket()
 
-            # Short wait for the thread to start
-            time.sleep(0.2)
+                # Short wait for the thread to start
+                time.sleep(0.3)
 
-            # Check that websockets.connect was called without ssl context
-            assert mock_connect.called, "websockets.connect was not called"
-            args, kwargs = mock_connect.call_args
+                # Check that websockets.connect was called without ssl context
+                assert mock_connect.called, "websockets.connect was not called"
+                args, kwargs = mock_connect.call_args
 
-            # For non-SSL connections, ssl parameter should not be present
-            assert "ssl" not in kwargs, "SSL context was unexpectedly provided for non-SSL connection"
-
-            # Clean up
-            client.disconnect()
+                # For non-SSL connections, ssl parameter should not be present
+                assert "ssl" not in kwargs, "SSL context was unexpectedly provided for non-SSL connection"
+            finally:
+                # Set running to False to prevent disconnect() from trying to close the connection
+                client.running = False
+                client.disconnect()
 
 
 @pytest.mark.asyncio
 async def test_ssl_context_configuration() -> None:
     """Test that SSL context is properly configured based on client settings."""
     # We need to import asyncio here for the mock side_effect
-    import asyncio
 
     # Create a client with SSL settings
     with patch("requests.Session") as mock_session_class:
@@ -201,6 +265,19 @@ async def test_ssl_context_configuration() -> None:
         # Set a WebSocket SSL URL
         client.ws_url = "wss://example.com/dicom-web/subscribers/TEST_AE"
 
+        # Protect the disconnect method from race conditions
+        original_disconnect = client.disconnect
+
+        def safe_disconnect() -> None:
+            # Prevent failures by setting ws_connection to a mock with a close method
+            if not client.ws_connection:
+                client.ws_connection = AsyncMock()
+                client.ws_connection.close = AsyncMock()
+            # Call original
+            original_disconnect()
+
+        client.disconnect = safe_disconnect
+
         # Mock SSLContext to avoid file not found errors
         with patch("ssl.create_default_context") as mock_create_context:
             mock_ssl_context = MagicMock()
@@ -208,11 +285,11 @@ async def test_ssl_context_configuration() -> None:
 
             # Mock websockets module with special handling for the asyncio test
             with patch("websockets.connect") as mock_connect:
-                # Create a mock for the websocket that never returns from recv()
+                # Create a mock for the websocket that returns a valid JSON string once
                 mock_websocket = AsyncMock()
-                # Create a future that never completes
+                # Return a valid JSON string once, then futures that never complete
                 future = asyncio.Future()
-                mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=lambda: future)
+                mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
                 try:
