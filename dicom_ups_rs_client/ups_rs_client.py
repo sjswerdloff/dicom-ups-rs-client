@@ -111,6 +111,9 @@ class UPSRSClient:
         max_retries: int = 3,
         retry_delay: int = 1,
         logger: logging.Logger | None = None,
+        verify_ssl: bool | str = True,
+        client_cert: str | tuple[str, str] | None = None,
+        websocket_url_override: str | None = None,
     ) -> None:
         """
         Initialize the UPS-RS client.
@@ -122,6 +125,17 @@ class UPSRSClient:
             max_retries: Maximum number of request retries
             retry_delay: Delay between retries in seconds
             logger: Optional logger instance
+            verify_ssl: SSL certificate verification. Can be:
+                - True: Verify SSL certificates (default)
+                - False: Disable SSL certificate verification (use with caution)
+                - str: Path to CA bundle file or directory with certificates
+            client_cert: Client-side certificate for authentication. Can be:
+                - None: No client certificate (default)
+                - str: Path to .pem file containing certificate and key
+                - tuple: (cert_file, key_file) paths
+            websocket_url_override: Optional override for WebSocket URL template.
+                Can include {aetitle} placeholder.
+                Example: "wss://example.com:9443/ws/subscribers/{aetitle}"
 
         """
         self.base_url = base_url.rstrip("/")
@@ -129,6 +143,9 @@ class UPSRSClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.verify_ssl = verify_ssl
+        self.client_cert = client_cert
+        self.websocket_url_override = websocket_url_override
 
         # Set up logging
         self.logger = logger or logging.getLogger("ups_rs_client")
@@ -149,6 +166,9 @@ class UPSRSClient:
 
         # Session for connection pooling
         self.session = requests.Session()
+        self.session.verify = self.verify_ssl
+        if self.client_cert:
+            self.session.cert = self.client_cert
 
         # Thread pool for async operations
         self.executor = ThreadPoolExecutor(max_workers=5)
@@ -938,6 +958,8 @@ class UPSRSClient:
             try:
                 response = self.session.request(method, url, headers=headers, json=json_data, timeout=self.timeout)
 
+                for key, value in response.headers.items():
+                    self.logger.warning(f"Response headers: {key}: {value}")
                 # Check for warning headers
                 warning_header = response.headers.get("Warning")
                 if warning_header:
@@ -956,7 +978,12 @@ class UPSRSClient:
                     for header in ["Content-Location", "Location", "Warning"]:
                         header_lower = header.lower()
                         if header_lower in response.headers:
+                            self.logger.info(f"Response header {header_lower}: {response.headers.get(header_lower)}")
                             result[header_lower.replace("-", "_")] = response.headers.get(header_lower)
+                            snake_case_header = header_lower.replace("-", "_")
+                            self.logger.info(
+                                f"Added {header_lower} to result in {snake_case_header}: {result[snake_case_header]}"
+                            )
 
                     return True, result
 
@@ -1043,6 +1070,52 @@ class UPSRSClient:
         # This should not be reached, but just in case
         return False, "Unknown error occurred during request"
 
+    def _construct_default_websocket_url(
+        self,
+        base_url: str,
+        endpoint: str,
+    ) -> str:
+        """
+        Construct a default WebSocket URL when none is provided in the response.
+
+        Args:
+            base_url: The base URL used for the REST API connection
+            endpoint: The endpoint used for the subscription request
+
+        Returns:
+            A WebSocket URL constructed based on the base_url and endpoint
+
+        """
+        from urllib.parse import urlparse, urlunparse
+
+        base_parsed = urlparse(base_url)
+
+        # Determine appropriate WebSocket scheme based on base URL
+        ws_scheme = "wss" if base_parsed.scheme == "https" else "ws"
+
+        # Use the host and port from the base URL
+        ws_netloc = base_parsed.netloc
+
+        # Extract the endpoint path without query parameters
+        endpoint_parsed = urlparse(endpoint)
+        base_path = base_parsed.path.rstrip("/")
+        endpoint_path = endpoint_parsed.path.rstrip("/")
+        self.logger.info(f"base_path {base_path}, endpoint_path {endpoint_path}")
+
+        # Construct appropriate WebSocket path
+        # Try to extract subscription ID if present
+        path_segments = endpoint_path.split("/")
+        if len(path_segments) > 2 and path_segments[-2] == "subscribers":
+            subscription_id = path_segments[-1]
+            ws_path = f"{base_path}/ws/subscribers/{subscription_id}"
+        else:
+            ws_path = f"{base_path}/ws"
+
+        ws_url = urlunparse((ws_scheme, ws_netloc, ws_path, "", "", ""))
+        self.logger.info(f"Constructed default WebSocket URL: {ws_url}")
+
+        return ws_url
+
     def _send_subscription_request(self, endpoint: str) -> tuple[bool, dict[str, Any] | str]:
         """
         Send a subscription request to the server.
@@ -1055,14 +1128,63 @@ class UPSRSClient:
 
         """
         success, response = self._send_request("POST", endpoint, success_code=201)
-
+        self.logger.info(f"endpoint {endpoint}")
         if success and isinstance(response, dict):
-            # Extract WebSocket URL from Content-Location header
-            self.ws_url = response.get("content_location")
-            if not self.ws_url:
-                self.logger.warning("No WebSocket URL provided in response")
+            for key, value in response.items():
+                self.logger.warning(f"{key}: {value}")
+
+            # Extract WebSocket URL from Content-Location header that has been
+            # converted to lower case and snake_case in _send_request()
+            ws_url = response.get("content_location")
+
+            if ws_url:
+                self.logger.info(f"WebSocket URL from  response content_location: {ws_url}")
+
+            # If we have a WebSocket URL override template, use it
+            if self.websocket_url_override:
+                # Replace {aetitle} placeholder if present
+                self.ws_url = self.websocket_url_override.format(aetitle=self.aetitle)
+                self.logger.info(f"Using WebSocket URL override: {self.ws_url}")
+            elif ws_url:
+                # Convert WebSocket URL to match the SSL configuration of the base URL
+                from urllib.parse import urlparse, urlunparse
+
+                base_parsed = urlparse(self.base_url)
+                ws_parsed = urlparse(ws_url)
+
+                # If base URL is HTTPS and WebSocket URL is WS, convert to WSS
+                if base_parsed.scheme == "https" and ws_parsed.scheme == "ws":
+                    ws_scheme = "wss"
+                else:
+                    ws_scheme = ws_parsed.scheme
+
+                # Use the host and port from the base URL if they differ
+                ws_host = ws_parsed.hostname
+                ws_port = ws_parsed.port
+
+                # If the base URL has a different host/port, use those instead
+                if base_parsed.hostname != ws_parsed.hostname or base_parsed.port != ws_parsed.port:
+                    ws_host = base_parsed.hostname
+                    ws_port = base_parsed.port
+
+                    # Build the netloc with the correct host/port
+                    if ws_port and ws_port not in (80, 443):
+                        ws_netloc = f"{ws_host}:{ws_port}"
+                    else:
+                        ws_netloc = ws_host
+                else:
+                    ws_netloc = ws_parsed.netloc
+
+                # Reconstruct the WebSocket URL
+                self.ws_url = urlunparse(
+                    (ws_scheme, ws_netloc, ws_parsed.path, ws_parsed.params, ws_parsed.query, ws_parsed.fragment)
+                )
+
+                self.logger.info(f"WebSocket URL converted from {ws_url} to {self.ws_url}")
             else:
-                response["ws_url"] = self.ws_url
+                self.ws_url = self._construct_default_websocket_url(self.base_url, endpoint)
+                self.logger.info("No WebSocket URL provided in response, using constructed default")
+            response["ws_url"] = self.ws_url
 
         return success, response
 
@@ -1135,6 +1257,8 @@ class UPSRSClient:
     async def _websocket_client(self) -> None:
         """Asynchronous WebSocket client implementation."""
         # Import websockets here to make it an optional dependency
+        import ssl
+
         import websockets
 
         # Initial connection
@@ -1142,29 +1266,71 @@ class UPSRSClient:
         max_retries = self.max_retries
         retry_count = 0
 
+        # Configure SSL context for WebSocket
+        ssl_context = None
+        if self.ws_url and self.ws_url.startswith("wss://"):
+            ssl_context = ssl.create_default_context()
+
+            if self.verify_ssl is False:
+                # Disable SSL verification (use with caution)
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif isinstance(self.verify_ssl, str):
+                # Use custom CA bundle
+                ssl_context.load_verify_locations(self.verify_ssl)
+
+            # Load client certificate if provided
+            if self.client_cert:
+                if isinstance(self.client_cert, tuple):
+                    ssl_context.load_cert_chain(self.client_cert[0], self.client_cert[1])
+                else:
+                    ssl_context.load_cert_chain(self.client_cert)
+
         while self.running:
             try:
                 self.logger.info(f"Connecting to WebSocket: {self.ws_url}")
 
-                async with websockets.connect(self.ws_url) as websocket:
-                    self.ws_connection = websocket
-                    self.logger.info("WebSocket connection established")
-                    retry_count = 0  # Reset retry counter on successful connection
+                # Pass SSL context to websockets.connect if needed
+                if ssl_context:
+                    async with websockets.connect(self.ws_url, ssl=ssl_context) as websocket:
+                        self.ws_connection = websocket
+                        self.logger.info("WebSocket connection established")
+                        retry_count = 0  # Reset retry counter on successful connection
 
-                    # Keep receiving messages until connection is closed
-                    while self.running:
-                        try:
-                            message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                            await self._handle_message(message)
-                        except TimeoutError:
-                            # No message received within timeout, check if we should continue
-                            if not self.running:
-                                # Exit the inner loop immediately if shutdown was requested
+                        # Keep receiving messages until connection is closed
+                        while self.running:
+                            try:
+                                message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                                await self._handle_message(message)
+                            except TimeoutError:
+                                # No message received within timeout, check if we should continue
+                                if not self.running:
+                                    # Exit the inner loop immediately if shutdown was requested
+                                    break
+                                continue
+                            except websockets.exceptions.ConnectionClosed as e:
+                                self.logger.warning(f"WebSocket connection closed: {e}")
                                 break
-                            continue
-                        except websockets.exceptions.ConnectionClosed as e:
-                            self.logger.warning(f"WebSocket connection closed: {e}")
-                            break
+                else:
+                    async with websockets.connect(self.ws_url) as websocket:
+                        self.ws_connection = websocket
+                        self.logger.info("WebSocket connection established")
+                        retry_count = 0  # Reset retry counter on successful connection
+
+                        # Keep receiving messages until connection is closed
+                        while self.running:
+                            try:
+                                message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                                await self._handle_message(message)
+                            except TimeoutError:
+                                # No message received within timeout, check if we should continue
+                                if not self.running:
+                                    # Exit the inner loop immediately if shutdown was requested
+                                    break
+                                continue
+                            except websockets.exceptions.ConnectionClosed as e:
+                                self.logger.warning(f"WebSocket connection closed: {e}")
+                                break
                 # Check running flag again after inner loop ends
                 if not self.running:
                     break
@@ -1237,6 +1403,33 @@ def main() -> None:
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of request retries")
+
+    # Add SSL/TLS related arguments
+    parser.add_argument(
+        "--no-verify-ssl",
+        action="store_true",
+        help="Disable SSL certificate verification (not recommended)",
+    )
+    parser.add_argument(
+        "--ca-bundle",
+        type=str,
+        help="Path to CA bundle file for SSL verification",
+    )
+    parser.add_argument(
+        "--client-cert",
+        type=str,
+        help="Path to client certificate file (.pem with both cert and key)",
+    )
+    parser.add_argument(
+        "--client-cert-key",
+        type=str,
+        help="Path to separate client key file (use with --client-cert for separate files)",
+    )
+    parser.add_argument(
+        "--websocket-url-override",
+        type=str,
+        help="Override WebSocket URL template. Use {aetitle} as placeholder. Example: wss://example.com:9443/ws/subscribers/{aetitle}",
+    )
 
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
@@ -1412,12 +1605,30 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    # Initialize client
+    # Determine SSL verification setting
+    verify_ssl = True
+    if args.no_verify_ssl:
+        verify_ssl = False
+    elif args.ca_bundle:
+        verify_ssl = args.ca_bundle
+
+    # Determine client certificate setting
+    client_cert = None
+    if args.client_cert:
+        if args.client_cert_key:
+            client_cert = (args.client_cert, args.client_cert_key)
+        else:
+            client_cert = args.client_cert
+
+    # Initialize client with SSL settings
     client = UPSRSClient(
         base_url=args.server,
         aetitle=args.aetitle,
         timeout=args.timeout,
         max_retries=args.max_retries,
+        verify_ssl=verify_ssl,
+        client_cert=client_cert,
+        websocket_url_override=args.websocket_url_override,
     )
 
     try:
