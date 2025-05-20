@@ -959,7 +959,7 @@ class UPSRSClient:
                 response = self.session.request(method, url, headers=headers, json=json_data, timeout=self.timeout)
 
                 for key, value in response.headers.items():
-                    self.logger.warning(f"Response headers: {key}: {value}")
+                    self.logger.debug(f"Response headers: {key}: {value}")
                 # Check for warning headers
                 warning_header = response.headers.get("Warning")
                 if warning_header:
