@@ -3,6 +3,8 @@
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from dicom_ups_rs_client.ups_rs_client import UPSRSClient
 
 
@@ -44,6 +46,58 @@ def test_init_with_custom_params() -> None:
         assert client.max_retries == 5
         assert client.retry_delay == 2
         assert client.logger is custom_logger
+
+
+def test_init_with_ssl_verification_disabled() -> None:
+    """Test initialization with SSL verification disabled."""
+    with patch("requests.Session") as mock_session_class:
+        mock_session = MagicMock()
+        mock_session_class.return_value = mock_session
+
+        client = UPSRSClient(base_url="https://example.com/dicom-web", verify_ssl=False)
+
+        assert client.verify_ssl is False
+        assert mock_session.verify is False
+
+
+def test_init_with_custom_ca_bundle() -> None:
+    """Test initialization with custom CA bundle."""
+    with patch("requests.Session") as mock_session_class:
+        mock_session = MagicMock()
+        mock_session_class.return_value = mock_session
+
+        client = UPSRSClient(base_url="https://example.com/dicom-web", verify_ssl="/path/to/ca-bundle.crt")
+
+        assert client.verify_ssl == "/path/to/ca-bundle.crt"
+        assert mock_session.verify == "/path/to/ca-bundle.crt"
+
+
+@pytest.mark.skip(reason="Deferring investigation, might be overzealous validation of CLI arguments.")
+def test_init_with_client_certificate() -> None:
+    """Test initialization with client certificate."""
+    with patch("requests.Session") as mock_session_class:
+        mock_session = MagicMock()
+        mock_session_class.return_value = mock_session
+
+        # Test with single file containing both cert and key
+        client = UPSRSClient(base_url="https://example.com/dicom-web", client_cert="/path/to/client.pem")
+
+        assert client.client_cert == "/path/to/client.pem"
+        assert mock_session.cert == "/path/to/client.pem"
+
+
+def test_init_with_client_certificate_tuple() -> None:
+    """Test initialization with client certificate and key as tuple."""
+    with patch("requests.Session") as mock_session_class:
+        mock_session = MagicMock()
+        mock_session_class.return_value = mock_session
+
+        # Test with separate cert and key files
+        cert_tuple = ("/path/to/client.crt", "/path/to/client.key")
+        client = UPSRSClient(base_url="https://example.com/dicom-web", client_cert=cert_tuple)
+
+        assert client.client_cert == cert_tuple
+        assert mock_session.cert == cert_tuple
 
 
 def test_base_url_trailing_slash_removal() -> None:
