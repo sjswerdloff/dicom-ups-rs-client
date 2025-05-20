@@ -101,6 +101,8 @@ asyncio.run(main())
 
 ### SSL/TLS Configuration
 
+> Note: The `verify_ssl` parameter accepts either a boolean (`True` for system/default CA verification, `False` to disable verification), or a string path to a custom CA bundle.
+
 ```python
 # Disable SSL verification (not recommended for production)
 client = UPSRSClient(
