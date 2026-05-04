@@ -1167,7 +1167,7 @@ class UPSRSClient:
                 except KeyError as exc:
                     raise UPSRSValidationError(
                         f"websocket_url_override template contains an unsupported placeholder: {exc}. "
-                        "Only {{aetitle}} is supported."
+                        f"Template: '{self.websocket_url_override}'. Only {{{{aetitle}}}} is supported."
                     ) from exc
                 self.logger.info(f"Using WebSocket URL override: {self.ws_url}")
             elif ws_url:
@@ -1264,20 +1264,18 @@ class UPSRSClient:
             self.logger.info(f"UPS Event Type: {event_type_id} with Affected SOP Instance UID: {affected_sop_instance_uid}")
 
             # Call user-provided event callback if it exists.
-            # The lock ensures that even when the callback is dispatched from a
-            # background WebSocket thread, at most one invocation runs at a time,
-            # preventing race conditions if the callback accesses shared state.
+            # The lock ensures that at most one callback runs at a time, even
+            # when invoked from background WebSocket threads.
             if self.event_callback:
-                if threading.current_thread() is threading.main_thread():
+
+                def _run_callback() -> None:
                     with self._callback_lock:
                         self.event_callback(event_data)
+
+                if threading.current_thread() is threading.main_thread():
+                    _run_callback()
                 else:
-
-                    def _invoke_callback(cb: Callable[[dict[str, Any]], None], data: dict[str, Any]) -> None:
-                        with self._callback_lock:
-                            cb(data)
-
-                    threading.Thread(target=_invoke_callback, args=(self.event_callback, event_data), daemon=True).start()
+                    self.executor.submit(_run_callback)
             else:
                 self.logger.warning("No event_callback assigned.  Check application level call to connect_websocket")
 

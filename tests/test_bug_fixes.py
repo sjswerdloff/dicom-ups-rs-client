@@ -132,6 +132,41 @@ class TestEventCallbackThreadSafety:
         assert errors == [], "Callbacks must never overlap: " + "; ".join(errors)
         assert max_concurrent[0] == 1, "At most one callback should run at a time"
 
+    def test_callback_lock_released_on_exception(self) -> None:
+        """Contract: callback lock is released even when the callback raises."""
+        import asyncio
+
+        client = _make_client()
+        calls: list[int] = [0]
+
+        def flaky_callback(event_data: dict[str, Any]) -> None:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise RuntimeError("boom")
+
+        client.event_callback = flaky_callback
+
+        def run_one() -> None:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(client._handle_message(json.dumps(SAMPLE_EVENT)))
+            except RuntimeError:
+                pass
+            finally:
+                loop.close()
+
+        # First call raises, second should still execute (lock not stuck)
+        t1 = threading.Thread(target=run_one, daemon=True)
+        t1.start()
+        t1.join(timeout=3.0)
+
+        t2 = threading.Thread(target=run_one, daemon=True)
+        t2.start()
+        t2.join(timeout=3.0)
+
+        assert not t2.is_alive(), "Second thread should not hang — callback lock may be stuck"
+        assert calls[0] == 2, f"Expected 2 callback invocations, got {calls[0]}"
+
     @pytest.mark.asyncio
     async def test_no_callback_assigned_logs_warning(self) -> None:
         """Contract: when no event_callback is set a warning is logged, not an error."""
@@ -180,10 +215,12 @@ class TestWebSocketUrlOverrideTemplate:
             self._subscribe_and_check(client)
 
     def test_validation_error_message_names_the_bad_key(self) -> None:
-        """Contract: the error message identifies the problematic placeholder name."""
-        client = _make_client(websocket_url_override="wss://custom.example.com:8443/ws/{typo_key}/subscribers")
-        with pytest.raises(UPSRSValidationError, match="typo_key"):
+        """Contract: the error message identifies the problematic placeholder and template."""
+        template = "wss://custom.example.com:8443/ws/{typo_key}/subscribers"
+        client = _make_client(websocket_url_override=template)
+        with pytest.raises(UPSRSValidationError, match="typo_key") as exc_info:
             self._subscribe_and_check(client)
+        assert template in str(exc_info.value)
 
     def test_original_key_error_is_chained(self) -> None:
         """Contract: the UPSRSValidationError chains the original KeyError as __cause__."""
