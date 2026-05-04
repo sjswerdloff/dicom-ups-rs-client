@@ -158,7 +158,7 @@ class UPSRSClient:
         # Set up logging
         self.logger = logger or logging.getLogger("ups_rs_client")
         if not logger:
-            self.logger.setLevel(logging.DEBUG)
+            self.logger.setLevel(logging.WARNING)
             if not self.logger.handlers:
                 handler = logging.StreamHandler()
                 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -171,6 +171,10 @@ class UPSRSClient:
         self.running = False
         self.event_callback = None
         self.ws_thread = None
+        # Lock to serialize event_callback invocations from background threads.
+        # event_callback may modify caller-owned shared state; callers must not
+        # assume re-entrant safety, so we guarantee at-most-one concurrent call.
+        self._callback_lock: threading.Lock = threading.Lock()
 
         # Session for connection pooling
         self.session = requests.Session()
@@ -971,7 +975,7 @@ class UPSRSClient:
                 # Check for warning headers
                 warning_header = response.headers.get("Warning")
                 if warning_header:
-                    self.logger.warning(f"Server warning: {warning_header}")
+                    self.logger.debug(f"Server warning: {warning_header}")
 
                 # Check response status
                 if response.status_code == success_code:
@@ -1003,7 +1007,10 @@ class UPSRSClient:
                         if response.text:
                             result["data"] = response.json()
                     except json.JSONDecodeError:
-                        pass
+                        self.logger.warning(
+                            "Unexpected: received non-JSON body in 204 No Content response from %s; body discarded",
+                            url,
+                        )
 
                     return True, result
                 # For partial content (status code 206)
@@ -1015,7 +1022,7 @@ class UPSRSClient:
                         # Log warning about partial results
                         self.logger.info("Partial results received. There may be more results available.")
                         if "Warning" in response.headers:
-                            self.logger.warning(f"Server warning: {response.headers['Warning']}")
+                            self.logger.debug(f"Server warning: {response.headers['Warning']}")
 
                         # Return just the list of results (to match 200 OK behavior)
                         return True, result_list
@@ -1024,11 +1031,13 @@ class UPSRSClient:
                         return False, "Failed to parse partial content response"
 
                 else:
-                    error_msg = f"Failed request to {url}. Status code: {response.status_code}"
+                    brief_error_msg = f"Failed request to {url}. Status code: {response.status_code}"
+                    error_msg = brief_error_msg
                     if response.text:
                         try:
                             error_details = response.json() if response.text else {}
                             if error_details:
+                                self.logger.debug(f"Response details: {error_details}")
                                 error_msg += f". Error details: {error_details}"
                             else:
                                 error_msg += f". Response: {response.text}"
@@ -1054,7 +1063,8 @@ class UPSRSClient:
                     # For other errors, retry if we haven't exceeded max retries
                     if retry_count < self.max_retries:
                         retry_count += 1
-                        self.logger.warning(f"{error_msg}. Retrying ({retry_count}/{self.max_retries})...")
+                        self.logger.warning(f"{brief_error_msg}. Retrying ({retry_count}/{self.max_retries})...")
+                        self.logger.debug(f"Full error details: {error_msg}")
                         time.sleep(self.retry_delay * retry_count)  # Exponential backoff
                         continue
                     else:
@@ -1150,8 +1160,15 @@ class UPSRSClient:
 
             # If we have a WebSocket URL override template, use it
             if self.websocket_url_override:
-                # Replace {aetitle} placeholder if present
-                self.ws_url = self.websocket_url_override.format(aetitle=self.aetitle)
+                # Replace {aetitle} placeholder if present.
+                # A KeyError means the template contains an unknown placeholder name.
+                try:
+                    self.ws_url = self.websocket_url_override.format(aetitle=self.aetitle)
+                except KeyError as exc:
+                    raise UPSRSValidationError(
+                        f"websocket_url_override template contains an unsupported placeholder: {exc}. "
+                        "Only {{aetitle}} is supported."
+                    ) from exc
                 self.logger.info(f"Using WebSocket URL override: {self.ws_url}")
             elif ws_url:
                 # Convert WebSocket URL to match the SSL configuration of the base URL
@@ -1246,14 +1263,21 @@ class UPSRSClient:
 
             self.logger.info(f"UPS Event Type: {event_type_id} with Affected SOP Instance UID: {affected_sop_instance_uid}")
 
-            # Call user-provided event callback if it exists
+            # Call user-provided event callback if it exists.
+            # The lock ensures that even when the callback is dispatched from a
+            # background WebSocket thread, at most one invocation runs at a time,
+            # preventing race conditions if the callback accesses shared state.
             if self.event_callback:
-                # Call the callback in the main thread to avoid threading issues
                 if threading.current_thread() is threading.main_thread():
-                    self.event_callback(event_data)
+                    with self._callback_lock:
+                        self.event_callback(event_data)
                 else:
-                    # Schedule the callback to run in the main thread
-                    threading.Thread(target=self.event_callback, args=(event_data,)).start()
+
+                    def _invoke_callback(cb: Callable[[dict[str, Any]], None], data: dict[str, Any]) -> None:
+                        with self._callback_lock:
+                            cb(data)
+
+                    threading.Thread(target=_invoke_callback, args=(self.event_callback, event_data), daemon=True).start()
             else:
                 self.logger.warning("No event_callback assigned.  Check application level call to connect_websocket")
 
@@ -1619,6 +1643,10 @@ def main() -> None:
         verify_ssl = False
     elif args.ca_bundle:
         verify_ssl = args.ca_bundle
+
+    # Validate client certificate arguments
+    if args.client_cert_key and not args.client_cert:
+        parser.error("--client-cert-key requires --client-cert to also be specified")
 
     # Determine client certificate setting
     client_cert = None

@@ -54,3 +54,4 @@ docs/_build/
 
 .qodo
 .vscode/
+code-graph.db/
