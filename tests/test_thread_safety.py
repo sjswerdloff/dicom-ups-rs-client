@@ -3,7 +3,6 @@
 import asyncio
 import json
 import threading
-import time
 from typing import Any
 from unittest.mock import patch
 
@@ -102,29 +101,38 @@ class TestEventCallbackThreadSafety:
         concurrent_count: list[int] = [0]
         max_concurrent: list[int] = [0]
         errors: list[str] = []
+        # Barrier ensures all threads are ready before any callback fires,
+        # maximising the chance of overlap if the lock is missing.
+        num_threads = 5
+        barrier = threading.Barrier(num_threads)
+        all_done = threading.Event()
 
-        def slow_callback(event_data: dict[str, Any]) -> None:
+        def coordinated_callback(event_data: dict[str, Any]) -> None:
             concurrent_count[0] += 1
             if concurrent_count[0] > 1:
                 errors.append(f"Concurrent invocations detected: {concurrent_count[0]}")
             max_concurrent[0] = max(max_concurrent[0], concurrent_count[0])
-            time.sleep(0.05)  # hold for a moment to expose overlap
+            # Use an event wait instead of sleep — deterministic, not timing-dependent
+            all_done.wait(timeout=0.2)
             concurrent_count[0] -= 1
 
-        client.event_callback = slow_callback
+        client.event_callback = coordinated_callback
 
         def run_one() -> None:
+            barrier.wait(timeout=5.0)  # synchronise thread start
             loop = asyncio.new_event_loop()
             try:
                 loop.run_until_complete(client._handle_message(json.dumps(SAMPLE_EVENT)))
             finally:
                 loop.close()
 
-        threads = [threading.Thread(target=run_one, daemon=True) for _ in range(5)]
+        threads = [threading.Thread(target=run_one, daemon=True) for _ in range(num_threads)]
         for t in threads:
             t.start()
+        # Signal callbacks to release after a brief hold
+        threading.Timer(0.3, all_done.set).start()
         for t in threads:
-            t.join(timeout=5.0)
+            t.join(timeout=10.0)
 
         assert errors == [], "Callbacks must never overlap: " + "; ".join(errors)
         assert max_concurrent[0] == 1, "At most one callback should run at a time"
