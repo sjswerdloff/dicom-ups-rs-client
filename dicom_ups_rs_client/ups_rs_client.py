@@ -1,26 +1,29 @@
 """DICOM UPS-RS Client."""
 
-import argparse
 import asyncio
 import json
 import logging
-import signal
-import sys
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from enum import Enum, auto
-from pathlib import Path
 from typing import Any
-
-# from asyncio import Future
 from urllib.parse import urlencode
 
 import requests
-from pydicom import Dataset, dcmread, uid
+from pydicom import Dataset, uid
 from pydicom.uid import generate_uid
+
+from dicom_ups_rs_client.enums import InputReadinessState, UPSState
+from dicom_ups_rs_client.exceptions import UPSRSError, UPSRSRequestError, UPSRSResponseError, UPSRSValidationError
+from dicom_ups_rs_client.serialization import (
+    CONTENT_TYPE_JSON,
+    CONTENT_TYPE_XML,
+    make_headers,
+    parse_response_body,
+    serialize_request,
+)
 
 __all__ = [
     "UPSRSClient",
@@ -30,68 +33,9 @@ __all__ = [
     "UPSRSResponseError",
     "UPSRSRequestError",
     "UPSRSValidationError",
+    "CONTENT_TYPE_JSON",
+    "CONTENT_TYPE_XML",
 ]
-
-
-class UPSState(Enum):
-    """UPS Procedure Step States as defined in DICOM."""
-
-    SCHEDULED = auto()
-    IN_PROGRESS = auto()
-    CANCELED = auto()
-    COMPLETED = auto()
-
-    def __str__(self) -> str:
-        """Return string representation for UPS-RS protocol."""
-        return self.name.replace("_", " ")
-
-
-class InputReadinessState(Enum):
-    """UPS Input Readiness States as defined in DICOM."""
-
-    READY = auto()
-    UNAVAILABLE = auto()
-    INCOMPLETE = auto()
-
-    def __str__(self) -> str:
-        """Return string representation for UPS-RS protocol."""
-        return self.name
-
-
-class UPSRSError(Exception):
-    """Base exception class for UPS-RS client errors."""
-
-    pass
-
-
-class UPSRSResponseError(UPSRSError):
-    """Exception raised for errors in the response from the UPS-RS server."""
-
-    def __init__(self, message: str, status_code: int, response_text: str | None = None) -> None:
-        """
-        Initialize the exception.
-
-        Args:
-            message (str): _description_
-            status_code (int): _description_
-            response_text (str | None, optional): _description_. Defaults to None.
-
-        """
-        self.status_code = status_code
-        self.response_text = response_text
-        super().__init__(message)
-
-
-class UPSRSRequestError(UPSRSError):
-    """Exception raised for errors in making requests to the UPS-RS server."""
-
-    pass
-
-
-class UPSRSValidationError(UPSRSError):
-    """Exception raised for validation errors in client inputs."""
-
-    pass
 
 
 class UPSRSClient:
@@ -114,6 +58,7 @@ class UPSRSClient:
         verify_ssl: bool | str = True,
         client_cert: str | tuple[str, str] | None = None,
         websocket_url_override: str | None = None,
+        content_type: str = CONTENT_TYPE_JSON,
     ) -> None:
         """
         Initialize the UPS-RS client.
@@ -136,6 +81,10 @@ class UPSRSClient:
             websocket_url_override: Optional override for WebSocket URL template.
                 Can include {aetitle} placeholder.
                 Example: "wss://example.com:9443/ws/subscribers/{aetitle}"
+            content_type: MIME type for request/response content negotiation.
+                Defaults to ``application/dicom+json``.
+                Use ``application/dicom+xml`` for XML content type.
+                WebSocket notifications always use JSON per PS3.18 Section 8.10.5.
 
         """
         self.base_url = base_url.rstrip("/")
@@ -145,6 +94,8 @@ class UPSRSClient:
         self.retry_delay = retry_delay
         self.verify_ssl = verify_ssl
         self.client_cert = client_cert
+        self.content_type = content_type
+
         # Validate client_cert tuple shape early
         if self.client_cert is not None:
             if not (
@@ -185,11 +136,11 @@ class UPSRSClient:
         # Thread pool for async operations
         self.executor = ThreadPoolExecutor(max_workers=5)
 
-    def __enter__(self):  # noqa: ANN204
+    def __enter__(self) -> "UPSRSClient":
         """Enter the runtime context for this client."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):  # noqa: ANN001, ANN204
+    def __exit__(self, exc_type: type | None, exc_val: Exception | None, exc_tb: object | None) -> bool:
         """Exit the runtime context for this client."""
         self.close()
         return False  # Propagate exceptions
@@ -222,6 +173,24 @@ class UPSRSClient:
                 # Log the exception
                 if hasattr(self, "logger"):
                     self.logger.error(f"Error closing session: {e}")
+
+    # ========== Header helpers ==========
+
+    def _make_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """
+        Build HTTP headers with the negotiated content type.
+
+        Args:
+            extra: Optional additional headers to merge. Keys in ``extra``
+                override the defaults only when they do not duplicate the
+                Content-Type or Accept keys (those are always derived from
+                ``self.content_type``).
+
+        Returns:
+            A dict containing at minimum ``Content-Type`` and ``Accept`` headers.
+
+        """
+        return make_headers(self.content_type, extra)
 
     # ========== Core Operations ==========
 
@@ -256,11 +225,7 @@ class UPSRSClient:
                 )
             endpoint = f"{endpoint}?workitem={workitem_uid}"
 
-        # Set headers
-        headers = {
-            "Content-Type": "application/dicom+json",
-            "Accept": "application/dicom+json",
-        }
+        headers = self._make_headers()
 
         return self._send_request("POST", endpoint, headers=headers, json_data=workitem_data, success_code=201)
 
@@ -283,7 +248,10 @@ class UPSRSClient:
         endpoint = f"{self.base_url}/workitems/{workitem_uid}"
 
         # Set headers according to DICOM PS3.18 specification
-        headers = {"Accept": "application/dicom+json", "Cache-Control": "no-cache"}
+        # Override Accept to include Cache-Control; Content-Type is not needed for GET
+        headers = self._make_headers(extra={"Cache-Control": "no-cache"})
+        # GET requests should not send Content-Type
+        headers.pop("Content-Type", None)
 
         return self._send_request("GET", endpoint, headers=headers)
 
@@ -332,12 +300,12 @@ class UPSRSClient:
         # Set endpoint URL with query parameters
         endpoint = f"{self.base_url}/workitems?{urlencode(params, doseq=True)}"
 
-        # Set headers
-        headers = {"Accept": "application/dicom+json"}
-
-        # Add Cache-Control header if no_cache is True
+        # Build headers — GET does not send a body, so no Content-Type
+        extra: dict[str, str] = {}
         if no_cache:
-            headers["Cache-Control"] = "no-cache"
+            extra["Cache-Control"] = "no-cache"
+        headers = self._make_headers(extra=extra)
+        headers.pop("Content-Type", None)
 
         success, response = self._send_request("GET", endpoint, headers=headers)
 
@@ -388,11 +356,7 @@ class UPSRSClient:
             # or test its response to a missing transaction uid when it is required
             endpoint = f"{self.base_url}/workitems/{workitem_uid}"
 
-        # Set headers
-        headers = {
-            "Content-Type": "application/dicom+json",
-            "Accept": "application/dicom+json",
-        }
+        headers = self._make_headers()
 
         return self._send_request("PUT", endpoint, headers=headers, json_data=update_data)
 
@@ -450,14 +414,10 @@ class UPSRSClient:
         # Set endpoint URL
         endpoint = f"{self.base_url}/workitems/{workitem_uid}/state"
 
-        # Set headers
-        headers = {
-            "Content-Type": "application/dicom+json",
-            "Accept": "application/dicom+json",
-        }
+        headers = self._make_headers()
 
         # Prepare payload
-        payload = {
+        payload: dict[str, Any] = {
             # Procedure Step State (0074,1000)
             "00741000": {"vr": "CS", "Value": [new_state]}
         }
@@ -502,7 +462,7 @@ class UPSRSClient:
         endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest"
 
         # Prepare payload with cancellation request information
-        payload = {}
+        payload: dict[str, Any] = {}
 
         # Add Reason For Cancellation (0074,1238) if provided
         if reason:
@@ -516,11 +476,7 @@ class UPSRSClient:
         if contact_uri:
             payload["0074100F"] = {"vr": "UT", "Value": [contact_uri]}
 
-        # Set headers
-        headers = {
-            "Content-Type": "application/dicom+json",
-            "Accept": "application/dicom+json",
-        }
+        headers = self._make_headers()
 
         return self._send_request("POST", endpoint, headers=headers, json_data=payload, success_code=202)
 
@@ -806,14 +762,7 @@ class UPSRSClient:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.executor,
-            lambda: self.search_workitems(
-                match_parameters,
-                include_fields,
-                fuzzy_matching,
-                offset,
-                limit,
-                no_cache,
-            ),
+            lambda: self.search_workitems(match_parameters, include_fields, fuzzy_matching, offset, limit, no_cache),
         )
 
     async def update_workitem_async(
@@ -827,7 +776,7 @@ class UPSRSClient:
 
         Args:
             workitem_uid: UID of the workitem to update
-            transaction_uid: Transaction UID (required for updates to IN PROGRESS workitems)
+            transaction_uid: Transaction UID for the update
             update_data: dictionary containing the workitem attributes to update
 
         Returns:
@@ -836,8 +785,7 @@ class UPSRSClient:
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            self.executor,
-            lambda: self.update_workitem(workitem_uid, transaction_uid, update_data),
+            self.executor, lambda: self.update_workitem(workitem_uid, transaction_uid, update_data)
         )
 
     async def change_workitem_state_async(
@@ -850,7 +798,7 @@ class UPSRSClient:
         Asynchronously change the state of a workitem on the UPS-RS server.
 
         Args:
-            workitem_uid: UID of the workitem to change
+            workitem_uid: UID of the workitem to update
             new_state: New state for the workitem
             transaction_uid: Transaction UID (required for state changes)
 
@@ -947,18 +895,25 @@ class UPSRSClient:
         self,
         method: str,
         url: str,
-        headers: dict[str, str] = None,
+        headers: dict[str, str] | None = None,
         json_data: Any = None,  # noqa: ANN401
         success_code: int = 200,
     ) -> tuple[bool, dict[str, Any] | str]:
         """
         Send an HTTP request to the UPS-RS server with retry logic.
 
+        When ``self.content_type`` is ``application/dicom+xml`` and ``json_data``
+        is provided, the body is serialised to XML via
+        ``dicom_ups_rs_client.serialization.serialize_request`` and sent as raw
+        bytes.  Response parsing similarly dispatches on the response Content-Type
+        header via ``dicom_ups_rs_client.serialization.parse_response_body``.
+
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
             url: The URL to send the request to
             headers: Optional HTTP headers
-            json_data: Optional JSON data to send
+            json_data: Optional data to send. Will be serialised to XML when the
+                negotiated content type is ``application/dicom+xml``.
             success_code: Expected HTTP status code for success
 
         Returns:
@@ -968,7 +923,12 @@ class UPSRSClient:
         retry_count = 0
         while retry_count <= self.max_retries:
             try:
-                response = self.session.request(method, url, headers=headers, json=json_data, timeout=self.timeout)
+                # Determine how to pass the body
+                if json_data is not None and self.content_type == CONTENT_TYPE_XML:
+                    body_bytes = serialize_request(json_data, self.content_type)
+                    response = self.session.request(method, url, headers=headers, data=body_bytes, timeout=self.timeout)
+                else:
+                    response = self.session.request(method, url, headers=headers, json=json_data, timeout=self.timeout)
 
                 for key, value in response.headers.items():
                     self.logger.debug(f"Response headers: {key}: {value}")
@@ -980,97 +940,42 @@ class UPSRSClient:
                 # Check response status
                 if response.status_code == success_code:
                     self.logger.info(f"Request to {url} successful")
-
-                    try:
-                        result = response.json() if response.text else {"status": "Success"}
-                    except json.JSONDecodeError:
-                        result = {"status": "Success", "response_text": response.text}
-
-                    # Add headers of interest
-                    for header in ["Content-Location", "Location", "Warning"]:
-                        header_lower = header.lower()
-                        if header_lower in response.headers:
-                            self.logger.info(f"Response header {header_lower}: {response.headers.get(header_lower)}")
-                            result[header_lower.replace("-", "_")] = response.headers.get(header_lower)
-                            snake_case_header = header_lower.replace("-", "_")
-                            self.logger.info(
-                                f"Added {header_lower} to result in {snake_case_header}: {result[snake_case_header]}"
-                            )
-
-                    return True, result
+                    parsed_success = self._parse_success_response(response, url)
+                    return True, parsed_success  # type: ignore[return-value]
 
                 # Handle no content (204) and partial content (206) specially
-                elif response.status_code == 204:
-                    result = {"status_code": response.status_code}
-                    result["message"] = "No Content"
-                    try:
-                        if response.text:
-                            result["data"] = response.json()
-                    except json.JSONDecodeError:
-                        self.logger.warning(
-                            "Unexpected: received non-JSON body in 204 No Content response from %s; body discarded",
-                            url,
-                        )
+                if response.status_code == 204:
+                    return True, self._parse_no_content_response(response, url)
 
-                    return True, result
-                # For partial content (status code 206)
-                elif response.status_code == 206:
-                    try:
-                        # Parse the JSON response
-                        result_list = response.json()
-
-                        # Log warning about partial results
-                        self.logger.info("Partial results received. There may be more results available.")
-                        if "Warning" in response.headers:
-                            self.logger.debug(f"Server warning: {response.headers['Warning']}")
-
-                        # Return just the list of results (to match 200 OK behavior)
-                        return True, result_list
-                    except json.JSONDecodeError:
-                        # Handle parsing error
+                if response.status_code == 206:
+                    parsed = self._parse_partial_content_response(response)
+                    if parsed is None:
                         return False, "Failed to parse partial content response"
+                    return True, parsed
 
+                # Error response handling
+                brief_error_msg = f"Failed request to {url}. Status code: {response.status_code}"
+                error_msg = self._build_error_message(brief_error_msg, response)
+
+                if warning_header:
+                    error_msg = f"{error_msg}, Warning: {warning_header}"
+
+                # Don't retry client errors except timeout (408) and too many requests (429)
+                if 400 <= response.status_code < 500 and response.status_code not in [408, 429]:
+                    self.logger.error(error_msg)
+                    return False, error_msg
+
+                # For other errors, retry if we haven't exceeded max retries
+                if retry_count < self.max_retries:
+                    retry_count += 1
+                    self.logger.warning(f"{brief_error_msg}. Retrying ({retry_count}/{self.max_retries})...")
+                    self.logger.debug(f"Full error details: {error_msg}")
+                    time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                    continue
                 else:
-                    brief_error_msg = f"Failed request to {url}. Status code: {response.status_code}"
-                    error_msg = brief_error_msg
-                    if response.text:
-                        try:
-                            error_details = response.json() if response.text else {}
-                            if error_details:
-                                self.logger.debug(f"Response details: {error_details}")
-                                error_msg += f". Error details: {error_details}"
-                            else:
-                                error_msg += f". Response: {response.text}"
-                            # return False, error_msg
-                        except json.JSONDecodeError:
-                            error_msg = f"{error_msg}, Response: {response.text}"
-                            #  return False, error_msg
-                        except ValueError:
-                            # Handle case where error response is not JSON
-                            error_msg = (
-                                f"Failed request to {url}. Status code: {response.status_code}. Response: {response.text}"
-                            )
-                        # return False, error_msg
-
-                    if warning_header:
-                        error_msg = f"{error_msg}, Warning: {warning_header}"
-
-                    # Don't retry client errors except timeout (408) and too many requests (429)
-                    if 400 <= response.status_code < 500 and response.status_code not in [408, 429]:
-                        self.logger.error(error_msg)
-                        return False, error_msg
-
-                    # For other errors, retry if we haven't exceeded max retries
-                    if retry_count < self.max_retries:
-                        retry_count += 1
-                        self.logger.warning(f"{brief_error_msg}. Retrying ({retry_count}/{self.max_retries})...")
-                        self.logger.debug(f"Full error details: {error_msg}")
-                        time.sleep(self.retry_delay * retry_count)  # Exponential backoff
-                        continue
-                    else:
-                        error_msg = f"{error_msg}. Max retries exceeded."
-                        self.logger.error(f"{error_msg}")
-                        return False, error_msg
+                    error_msg = f"{error_msg}. Max retries exceeded."
+                    self.logger.error(f"{error_msg}")
+                    return False, error_msg
 
             except requests.RequestException as e:
                 error_msg = f"Request error: {str(e)}"
@@ -1087,6 +992,147 @@ class UPSRSClient:
 
         # This should not be reached, but just in case
         return False, "Unknown error occurred during request"
+
+    def _parse_success_response(self, response: requests.Response, url: str) -> dict[str, Any] | list[Any]:
+        """
+        Parse the body of a successful HTTP response.
+
+        The parsing strategy is determined by the response ``Content-Type`` header:
+        - ``application/dicom+xml`` → parse as a single DICOM XML document.
+        - ``multipart/related`` → parse as multipart DICOM XML.
+        - Anything else (including empty body) → JSON or a default success dict.
+
+        After parsing, selected response headers (``Content-Location``,
+        ``Location``, ``Warning``) are merged into the result dict when the
+        parsed body is a dict.  When the body is a list (e.g. search results),
+        these headers are not merged (they are not expected in that case).
+
+        Args:
+            response: The successful HTTP response object.
+            url: The request URL, used only for log messages.
+
+        Returns:
+            A dict or list containing the parsed response body.
+            When the body is a dict, selected response headers are also
+            included as keys.
+
+        """
+        response_content_type = response.headers.get("Content-Type", "")
+
+        parsed_result: dict[str, Any] | list[Any]
+
+        if not response.text:
+            parsed_result = {"status": "Success"}
+        else:
+            try:
+                parsed = parse_response_body(response.content, response.text, response_content_type)
+                # parse_response_body may return a Dataset or list[Dataset] for XML
+                if isinstance(parsed, Dataset):
+                    parsed_result = json.loads(parsed.to_json())
+                elif isinstance(parsed, list) and parsed and isinstance(parsed[0], Dataset):
+                    # Multipart XML search response — convert each Dataset to JSON-dict
+                    parsed_result = [json.loads(ds.to_json()) for ds in parsed]
+                elif isinstance(parsed, list):
+                    parsed_result = parsed
+                elif isinstance(parsed, dict):
+                    parsed_result = parsed
+                else:
+                    parsed_result = {"data": parsed}
+            except (json.JSONDecodeError, Exception):
+                parsed_result = {"status": "Success", "response_text": response.text}
+
+        # Add headers of interest — only when parsed_result is a dict
+        if isinstance(parsed_result, dict):
+            for header in ["Content-Location", "Location", "Warning"]:
+                header_lower = header.lower()
+                if header_lower in response.headers:
+                    self.logger.info(f"Response header {header_lower}: {response.headers.get(header_lower)}")
+                    parsed_result[header_lower.replace("-", "_")] = response.headers.get(header_lower)
+                    snake_case_header = header_lower.replace("-", "_")
+                    self.logger.info(
+                        f"Added {header_lower} to result in {snake_case_header}: {parsed_result[snake_case_header]}"
+                    )
+
+        return parsed_result
+
+    def _parse_no_content_response(self, response: requests.Response, url: str) -> dict[str, Any]:
+        """
+        Parse a 204 No Content response.
+
+        Args:
+            response: The HTTP response with status 204.
+            url: The request URL, used only for log messages.
+
+        Returns:
+            A dict with ``status_code`` and ``message``, and optionally ``data``.
+
+        """
+        result: dict[str, Any] = {"status_code": response.status_code, "message": "No Content"}
+        if response.text:
+            try:
+                result["data"] = json.loads(response.text)
+            except json.JSONDecodeError:
+                self.logger.warning(
+                    "Unexpected: received non-JSON body in 204 No Content response from %s; body discarded",
+                    url,
+                )
+        return result
+
+    def _parse_partial_content_response(self, response: requests.Response) -> list[Any] | None:
+        """
+        Parse a 206 Partial Content response.
+
+        Args:
+            response: The HTTP response with status 206.
+
+        Returns:
+            A list of parsed results, or ``None`` if parsing fails.
+
+        """
+        response_content_type = response.headers.get("Content-Type", "")
+        try:
+            parsed = parse_response_body(response.content, response.text, response_content_type)
+        except (json.JSONDecodeError, Exception):
+            return None
+
+        self.logger.info("Partial results received. There may be more results available.")
+        if "Warning" in response.headers:
+            self.logger.debug(f"Server warning: {response.headers['Warning']}")
+
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]
+
+    def _build_error_message(self, brief_error_msg: str, response: requests.Response) -> str:
+        """
+        Build a descriptive error message from a non-success HTTP response.
+
+        Error responses from servers always use JSON (the server may return JSON
+        error bodies even when XML was requested), so we attempt JSON parsing first
+        and fall back to the raw response text.
+
+        Args:
+            brief_error_msg: Short message identifying the failing request.
+            response: The HTTP error response object.
+
+        Returns:
+            A string describing the error, including any available details.
+
+        """
+        error_msg = brief_error_msg
+        if response.text:
+            try:
+                error_details = json.loads(response.text)
+                if error_details:
+                    self.logger.debug(f"Response details: {error_details}")
+                    error_msg += f". Error details: {error_details}"
+                else:
+                    error_msg += f". Response: {response.text}"
+            except json.JSONDecodeError:
+                error_msg = f"{error_msg}, Response: {response.text}"
+            except ValueError:
+                error_msg = f"{brief_error_msg}. Response: {response.text}"
+        return error_msg
 
     def _construct_default_websocket_url(
         self,
@@ -1246,6 +1292,8 @@ class UPSRSClient:
         """
         Process incoming WebSocket messages with DICOM UPS-RS event notifications.
 
+        WebSocket messages are always application/dicom+json per PS3.18 Section 8.10.5.
+
         Args:
             message: The received message in DICOM+JSON format
 
@@ -1270,7 +1318,7 @@ class UPSRSClient:
 
                 def _run_callback() -> None:
                     with self._callback_lock:
-                        self.event_callback(event_data)
+                        self.event_callback(event_data)  # type: ignore[misc]
 
                 if threading.current_thread() is threading.main_thread():
                     _run_callback()
@@ -1297,7 +1345,7 @@ class UPSRSClient:
         retry_count = 0
 
         # Configure SSL context for WebSocket
-        ssl_context = None
+        ssl_context: ssl.SSLContext | None = None
         if self.ws_url and self.ws_url.startswith("wss://"):
             ssl_context = ssl.create_default_context()
 
@@ -1320,62 +1368,45 @@ class UPSRSClient:
             try:
                 self.logger.info(f"Connecting to WebSocket: {self.ws_url}")
 
-                # Pass SSL context to websockets.connect if needed
+                # Pass SSL context to websockets.connect only when needed
+                connect_kwargs: dict[str, Any] = {}
                 if ssl_context:
-                    async with websockets.connect(self.ws_url, ssl=ssl_context) as websocket:
-                        self.ws_connection = websocket
-                        self.logger.info("WebSocket connection established")
-                        retry_count = 0  # Reset retry counter on successful connection
+                    connect_kwargs["ssl"] = ssl_context
 
-                        # Keep receiving messages until connection is closed
-                        while self.running:
-                            try:
-                                message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                                await self._handle_message(message)
-                            except TimeoutError:
-                                # No message received within timeout, check if we should continue
-                                if not self.running:
-                                    # Exit the inner loop immediately if shutdown was requested
-                                    break
-                                continue
-                            except websockets.exceptions.ConnectionClosed as e:
-                                self.logger.warning(f"WebSocket connection closed: {e}")
-                                break
-                else:
-                    async with websockets.connect(self.ws_url) as websocket:
-                        self.ws_connection = websocket
-                        self.logger.info("WebSocket connection established")
-                        retry_count = 0  # Reset retry counter on successful connection
+                async with websockets.connect(self.ws_url, **connect_kwargs) as websocket:
+                    self.ws_connection = websocket
+                    self.logger.info("WebSocket connection established")
+                    retry_count = 0  # Reset retry counter on successful connection
 
-                        # Keep receiving messages until connection is closed
-                        while self.running:
-                            try:
-                                message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                                await self._handle_message(message)
-                            except TimeoutError:
-                                # No message received within timeout, check if we should continue
-                                if not self.running:
-                                    # Exit the inner loop immediately if shutdown was requested
-                                    break
-                                continue
-                            except websockets.exceptions.ConnectionClosed as e:
-                                self.logger.warning(f"WebSocket connection closed: {e}")
+                    # Keep receiving messages until connection is closed
+                    while self.running:
+                        try:
+                            message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                            await self._handle_message(message)
+                        except TimeoutError:
+                            # No message received within timeout, check if we should continue
+                            if not self.running:
+                                # Exit the inner loop immediately if shutdown was requested
                                 break
+                            continue
+                        except websockets.exceptions.ConnectionClosed as e:
+                            self.logger.warning(f"WebSocket connection closed: {e}")
+                            break
+
                 # Check running flag again after inner loop ends
                 if not self.running:
                     break
+
             except (
                 websockets.exceptions.WebSocketException,
                 ConnectionRefusedError,
             ) as e:
                 if not self.running:
-                    break  # Exit if we're shutting down
+                    break
 
                 retry_count += 1
-                self.logger.error(f"WebSocket connection error: {str(e)}")
-
-                if retry_count >= max_retries:
-                    self.logger.error(f"Maximum retries ({max_retries}) reached. Giving up.")
+                if retry_count > max_retries:
+                    self.logger.error(f"Maximum retries exceeded. Last error: {e}")
                     self.running = False
                     break
 
@@ -1397,726 +1428,25 @@ class UPSRSClient:
         self.logger.info("WebSocket client stopped")
 
 
+# Keep backward-compatible entry points — the real implementations are in cli.py
+def main() -> None:
+    """Execute the CLI entry point.  Implementation lives in :mod:`dicom_ups_rs_client.cli`."""
+    from dicom_ups_rs_client.cli import main as _main
+
+    _main()
+
+
 def _event_handler(event_data: dict[str, Any]) -> None:
     """
-    Handle incoming UPS-RS events.
+    Handle incoming UPS-RS events (re-exported from cli module for backward compatibility).
 
     Args:
         event_data: dictionary containing event information
 
     """
-    try:
-        event_type_id = event_data.get("00001002", {}).get("Value", ["unknown"])[0]
-        affected_sop_instance_uid = event_data.get("00001000", {}).get("Value", ["unknown"])[0]
-        print(f"\nEVENT RECEIVED: {event_type_id} - Workitem: {affected_sop_instance_uid}")
-    except (KeyError, IndexError):
-        print("\nEVENT RECEIVED: (unable to extract event type or workitem UID)")
+    from dicom_ups_rs_client.cli import _event_handler as _cli_event_handler
 
-    print(json.dumps(event_data, indent=2))
-    print("-" * 60)
-
-
-def main() -> None:
-    """Execute Main CLI entry point for UPS-RS client."""
-    parser = argparse.ArgumentParser(description="DICOM UPS-RS Client")
-    parser.add_argument(
-        "--server",
-        type=str,
-        required=True,
-        help="URL of the UPS-RS server (e.g., http://localhost:5000)",
-    )
-    parser.add_argument(
-        "--aetitle",
-        type=str,
-        help="Application Entity Title for subscription operations",
-    )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of request retries")
-
-    # Add SSL/TLS related arguments
-    parser.add_argument(
-        "--no-verify-ssl",
-        action="store_true",
-        help="Disable SSL certificate verification (not recommended)",
-    )
-    parser.add_argument(
-        "--ca-bundle",
-        type=str,
-        help="Path to CA bundle file for SSL verification",
-    )
-    parser.add_argument(
-        "--client-cert",
-        type=str,
-        help="Path to client certificate file (.pem with both cert and key)",
-    )
-    parser.add_argument(
-        "--client-cert-key",
-        type=str,
-        help="Path to separate client key file (use with --client-cert for separate files)",
-    )
-    parser.add_argument(
-        "--websocket-url-override",
-        type=str,
-        help="Override WebSocket URL template. Use {aetitle} as placeholder. Example: wss://example.com:9443/ws/subscribers/{aetitle}",
-    )
-
-    # Create subparsers for different commands
-    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
-
-    # Create workitem command
-    create_parser = subparsers.add_parser("create", help="Create a new workitem")
-    create_parser.add_argument("--workitem-uid", type=str, help="Optional UID for the workitem")
-    create_parser.add_argument("--input-file", type=str, help="JSON file containing workitem data")
-    create_parser.add_argument("--input-dcm", type=str, help="DICOM file containing workitem data")
-
-    # Retrieve workitem command
-    retrieve_parser = subparsers.add_parser("retrieve", help="Retrieve a workitem")
-    retrieve_parser.add_argument(
-        "--workitem-uid",
-        type=str,
-        required=True,
-        help="UID of the workitem to retrieve",
-    )
-    retrieve_parser.add_argument(
-        "--output-file",
-        type=str,
-        help="Output file to save the retrieved workitem JSON",
-    )
-
-    # Search workitems command
-    search_parser = subparsers.add_parser("search", help="Search for workitems")
-    search_parser.add_argument(
-        "--match",
-        action="append",
-        help="Match parameters (e.g., '00741000=SCHEDULED')",
-        default=[],
-    )
-    search_parser.add_argument(
-        "--includefield",
-        action="append",
-        help="Fields to include in results",
-        default=[],
-    )
-    search_parser.add_argument("--fuzzy", action="store_true", help="Enable fuzzy matching")
-    search_parser.add_argument(
-        "--state",
-        choices=["SCHEDULED", "IN PROGRESS", "CANCELED", "COMPLETED"],
-        help="Filter by Procedure Step State (00741000)",
-    )
-    search_parser.add_argument(
-        "--readiness",
-        choices=["READY", "UNAVAILABLE", "INCOMPLETE"],
-        help="Filter by Input Readiness State (00404041)",
-    )
-    search_parser.add_argument(
-        "--start-date",
-        type=str,
-        help="Filter by Scheduled Start Date (00404005) in YYYYMMDD format",
-    )
-    search_parser.add_argument("--label", type=str, help="Filter by Procedure Step Label (00741204)")
-    search_parser.add_argument("--offset", type=int, default=0, help="Starting position of results")
-    search_parser.add_argument("--limit", type=int, help="Maximum number of results to return")
-    search_parser.add_argument("--no-cache", action="store_true", help="Request non-cached results")
-    search_parser.add_argument("--output-file", type=str, help="Output file to save search results")
-    search_parser.add_argument("--summary", action="store_true", help="Display only a summary of results")
-    search_parser.add_argument(
-        "--display-fields",
-        type=str,
-        help="Comma-separated list of fields to display in output summary",
-    )
-
-    # Update workitem command
-    update_parser = subparsers.add_parser("update", help="Update a workitem")
-    update_parser.add_argument("--workitem-uid", type=str, required=True, help="UID of the workitem to update")
-    update_parser.add_argument("--transaction-uid", type=str, help="Transaction UID")
-    update_parser.add_argument("--input-file", type=str, help="JSON file containing update data")
-    update_parser.add_argument("--procedure-label", type=str, help="Set the Procedure Step Label (0074,1204)")
-    update_parser.add_argument(
-        "--procedure-description",
-        type=str,
-        help="Set the Procedure Step Description (0040,0007)",
-    )
-
-    # Change workitem state command
-    state_parser = subparsers.add_parser("change-state", help="Change workitem state")
-    state_parser.add_argument(
-        "--workitem-uid",
-        type=str,
-        required=True,
-        help="UID of the workitem to change state",
-    )
-    state_parser.add_argument(
-        "--state",
-        type=str,
-        required=True,
-        choices=["IN PROGRESS", "COMPLETED", "CANCELED"],
-        help="New state for the workitem",
-    )
-    state_parser.add_argument(
-        "--transaction-uid",
-        type=str,
-        help="Transaction UID (required for COMPLETED/CANCELED states, optional for IN PROGRESS)",
-    )
-
-    # Request cancellation command
-    cancel_parser = subparsers.add_parser("request-cancel", help="Request cancellation of a workitem")
-    cancel_parser.add_argument(
-        "--workitem-uid",
-        type=str,
-        required=True,
-        help="UID of the workitem to request cancellation for",
-    )
-    cancel_parser.add_argument("--reason", type=str, help="Reason for the cancellation request")
-    cancel_parser.add_argument("--contact-name", type=str, help="Display name of the contact person")
-    cancel_parser.add_argument(
-        "--contact-uri",
-        type=str,
-        help="URI for contacting the requestor (e.g., mailto:user@example.com)",
-    )
-
-    # Subscribe command
-    subscribe_parser = subparsers.add_parser("subscribe", help="Subscribe to workitem events")
-    subscribe_group = subscribe_parser.add_mutually_exclusive_group(required=True)
-    subscribe_group.add_argument("--worklist", action="store_true", help="Subscribe to the entire worklist")
-    subscribe_group.add_argument(
-        "--filtered-worklist",
-        action="store_true",
-        help="Subscribe to a filtered worklist",
-    )
-    subscribe_group.add_argument("--workitem", type=str, help="UID of a specific workitem to subscribe to")
-    subscribe_parser.add_argument(
-        "--filter",
-        action="append",
-        help="Filter parameters for filtered worklist (e.g., '00741000=SCHEDULED')",
-        default=[],
-    )
-    subscribe_parser.add_argument(
-        "--deletion-lock",
-        action="store_true",
-        help="Request deletion lock for the subscription",
-    )
-    subscribe_parser.add_argument(
-        "--monitor",
-        action="store_true",
-        help="Monitor for event notifications after subscribing",
-    )
-
-    # Unsubscribe command
-    unsubscribe_parser = subparsers.add_parser("unsubscribe", help="Unsubscribe from workitem events")
-    unsubscribe_group = unsubscribe_parser.add_mutually_exclusive_group(required=True)
-    unsubscribe_group.add_argument("--worklist", action="store_true", help="Unsubscribe from the entire worklist")
-    unsubscribe_group.add_argument(
-        "--filtered-worklist",
-        action="store_true",
-        help="Unsubscribe from a filtered worklist",
-    )
-    unsubscribe_group.add_argument("--workitem", type=str, help="UID of a specific workitem to unsubscribe from")
-    unsubscribe_parser.add_argument(
-        "--filter",
-        action="append",
-        help="Filter parameters for filtered worklist (e.g., '00741000=SCHEDULED')",
-        default=[],
-    )
-    unsubscribe_parser.add_argument(
-        "--deletion-lock",
-        action="store_true",
-        help="Request deletion lock for the unsubscription",
-    )
-
-    args = parser.parse_args()
-
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-
-    # Check for required command
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    # Determine SSL verification setting
-    verify_ssl = True
-    if args.no_verify_ssl:
-        verify_ssl = False
-    elif args.ca_bundle:
-        verify_ssl = args.ca_bundle
-
-    # Validate client certificate arguments
-    if args.client_cert_key and not args.client_cert:
-        parser.error("--client-cert-key requires --client-cert to also be specified")
-
-    # Determine client certificate setting
-    client_cert = None
-    if args.client_cert:
-        if args.client_cert_key:
-            client_cert = (args.client_cert, args.client_cert_key)
-        else:
-            client_cert = args.client_cert
-
-    # Initialize client with SSL settings
-    client = UPSRSClient(
-        base_url=args.server,
-        aetitle=args.aetitle,
-        timeout=args.timeout,
-        max_retries=args.max_retries,
-        verify_ssl=verify_ssl,
-        client_cert=client_cert,
-        websocket_url_override=args.websocket_url_override,
-    )
-
-    try:
-        # Execute the requested command
-        if args.command == "create":
-            _handle_create_command(client, args)
-        elif args.command == "retrieve":
-            _handle_retrieve_command(client, args)
-        elif args.command == "search":
-            _handle_search_command(client, args)
-        elif args.command == "update":
-            _handle_update_command(client, args)
-        elif args.command == "change-state":
-            _handle_change_state_command(client, args)
-        elif args.command == "request-cancel":
-            _handle_cancel_request_command(client, args)
-        elif args.command == "subscribe":
-            _handle_subscribe_command(client, args)
-        elif args.command == "unsubscribe":
-            _handle_unsubscribe_command(client, args)
-    finally:
-        # Ensure proper cleanup
-        client.close()
-
-
-def _handle_create_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the create workitem command."""
-    # Generate a DICOM UID if one wasn't provided on the command line
-    workitem_uid = args.workitem_uid or str(generate_uid())
-
-    # Load workitem data if provided
-    workitem_data = None
-    if args.input_file:
-        try:
-            with open(args.input_file) as f:
-                workitem_data = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to load workitem data from {args.input_file}: {str(e)}")
-            sys.exit(1)
-
-    if args.input_dcm:
-        try:
-            dcm_path = Path(args.input_dcm)
-            local_json_path = Path(dcm_path.name.removesuffix("dcm") + "json")
-
-            workitem_ds = dcmread(args.input_dcm)
-            # Make sure the workitem_uid is consistent in the post and the data
-            if not args.workitem_uid:
-                workitem_uid = str(workitem_ds.SOPInstanceUID)
-            else:
-                workitem_ds.SOPInstanceUID = workitem_uid
-            workitem_uid = workitem_uid or str(generate_uid())
-
-            workitem_data = json.loads(workitem_ds.to_json())
-            local_json_path.write_text(json.dumps(workitem_data, indent=2))
-
-        except Exception as e:
-            logging.error(f"Failed to load workitem data from {args.input_dcm}: {str(e)}")
-            sys.exit(1)
-
-    # Create workitem
-    success, response = client.create_workitem(workitem_data, workitem_uid)
-
-    if success:
-        print("Workitem created successfully")
-        print(json.dumps(response, indent=2))
-        print(f"Workitem UID: {workitem_uid}")
-        sys.exit(0)
-    else:
-        print(f"Failed to create workitem: {response}")
-        sys.exit(1)
-
-
-def _handle_retrieve_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the retrieve workitem command."""
-    success, response = client.retrieve_workitem(args.workitem_uid)
-
-    if success:
-        print("Workitem retrieved successfully")
-        formatted_response = json.dumps(response, indent=2)
-        print(formatted_response)
-
-        # Save to file if requested
-        if args.output_file:
-            try:
-                with open(args.output_file, "w") as f:
-                    f.write(formatted_response)
-                print(f"Workitem saved to {args.output_file}")
-            except Exception as e:
-                print(f"Failed to save workitem to file: {str(e)}")
-                sys.exit(1)
-
-        sys.exit(0)
-    else:
-        print(f"Failed to retrieve workitem: {response}")
-        sys.exit(1)
-
-
-def _handle_search_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the search workitems command."""
-    # Parse match parameters
-    match_parameters = {}
-    for param in args.match:
-        if "=" in param:
-            key, value = param.split("=", 1)
-            match_parameters[key] = value
-        else:
-            logging.warning(f"Ignoring invalid match parameter (missing '='): {param}")
-
-    # Add common search parameters if provided
-    if args.state:
-        match_parameters["00741000"] = args.state
-
-    if args.readiness:
-        match_parameters["00404041"] = args.readiness
-
-    if args.start_date:
-        match_parameters["00404005"] = args.start_date
-
-    if args.label:
-        match_parameters["00741204"] = args.label
-
-    # Inform user about search criteria
-    _summarize_search_criteria(match_parameters)
-
-    # Perform search
-    success, response = client.search_workitems(
-        match_parameters,
-        args.includefield,
-        args.fuzzy,
-        args.offset,
-        args.limit,
-        args.no_cache,
-    )
-
-    if not success:
-        print(f"Failed to search workitems: {response}")
-        sys.exit(1)
-
-    if isinstance(response, list) and response:
-        result_count = len(response)
-        print(f"Search returned {result_count} result(s)")
-
-        # Display summary if requested or full results
-        if args.summary:
-            _summarize_search_results(args, response)
-        else:
-            # Print full formatted results
-            formatted_response = json.dumps(response, indent=2)
-            print(formatted_response)
-
-        # Save to file if requested
-        if args.output_file:
-            try:
-                with open(args.output_file, "w") as f:
-                    f.write(json.dumps(response, indent=2))
-                print(f"Search results saved to {args.output_file}")
-            except Exception as e:
-                print(f"Failed to save search results to file: {str(e)}")
-                sys.exit(1)
-    else:
-        print("No matching workitems found")
-
-    sys.exit(0)
-
-
-def _summarize_search_criteria(match_parameters: dict[str, str]) -> None:
-    """Print a summary of the search criteria."""
-    if match_parameters:
-        print("Searching with criteria:")
-        for tag, value in match_parameters.items():
-            tag_name = ""
-            if tag == "00741000":
-                tag_name = "Procedure Step State"
-            elif tag == "00404041":
-                tag_name = "Input Readiness State"
-            elif tag == "00404005":
-                tag_name = "Scheduled Start Date"
-            elif tag == "00741204":
-                tag_name = "Procedure Step Label"
-
-            if tag_name:
-                print(f"  {tag_name} ({tag}) = {value}")
-            else:
-                print(f"  {tag} = {value}")
-    else:
-        print("Searching with no criteria (will return all workitems)")
-
-
-def _summarize_search_results(args: argparse.Namespace, response: list[dict[str, Any]]) -> None:
-    """Print a summary of the search results."""
-    print("\nSummary of Workitems:")
-    print("-" * 80)
-
-    # Determine which fields to display in summary
-    display_fields = []
-    display_fields = (
-        args.display_fields.split(",") if args.display_fields else ["00080018", "00741000", "00404041", "00741204"]
-    )
-    # Print header
-    header_row = []
-    for field in display_fields:
-        if field == "00080018":
-            header_row.append("SOP Instance UID")
-        elif field == "00404005":
-            header_row.append("Scheduled Start")
-        elif field == "00404041":
-            header_row.append("Input Readiness")
-        elif field == "00741000":
-            header_row.append("Procedure Step State")
-        elif field == "00741204":
-            header_row.append("Procedure Label")
-        else:
-            header_row.append(field)
-
-    print(" | ".join(header_row))
-    print("-" * 80)
-
-    # Print each workitem
-    for wi in response:
-        row = []
-        for field in display_fields:
-            if field in wi and "Value" in wi[field] and wi[field]["Value"]:
-                value = wi[field]["Value"][0]
-                # Truncate long values
-                if isinstance(value, str) and len(value) > 30:
-                    value = f"{value[:27]}..."
-                row.append(str(value))
-            else:
-                row.append("N/A")
-
-        print(" | ".join(row))
-
-    print("-" * 80)
-
-
-def _handle_update_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the update workitem command."""
-    # Prepare update data
-    update_data = {}
-
-    # Load from file if provided
-    if args.input_file:
-        try:
-            with open(args.input_file) as f:
-                update_data = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to load update data from {args.input_file}: {str(e)}")
-            sys.exit(1)
-
-    # Add command line attributes if provided
-    if args.procedure_label:
-        update_data["00741204"] = {"vr": "LO", "Value": [args.procedure_label]}
-
-    if args.procedure_description:
-        update_data["00400007"] = {"vr": "LO", "Value": [args.procedure_description]}
-
-    if not args.transaction_uid:
-        print("Transaction UID not provided, only valid if UPS is SCHEDULED")
-
-    # Ensure we have some update data
-    if not update_data:
-        logging.error("No update data provided. Use --input-file or command line options.")
-        sys.exit(1)
-
-    # Update workitem
-    success, response = client.update_workitem(args.workitem_uid, args.transaction_uid, update_data)
-
-    if success:
-        print("Workitem updated successfully")
-
-        # Display any warnings
-        if isinstance(response, dict) and "warning" in response:
-            print(f"Warning: {response['warning']}")
-
-        # Display full response if available and verbose
-        if args.verbose and isinstance(response, dict) and "response" in response:
-            print("\nFull response:")
-            print(json.dumps(response["response"], indent=2))
-
-        sys.exit(0)
-    else:
-        print(f"Failed to update workitem: {response}")
-        sys.exit(1)
-
-
-def _handle_change_state_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the change workitem state command."""
-    # Change workitem state
-    success, response = client.change_workitem_state(args.workitem_uid, args.state, args.transaction_uid)
-
-    if success:
-        print(f"Workitem state changed successfully to {args.state}")
-
-        # Display transaction UID for future reference
-        if isinstance(response, dict) and "transaction_uid" in response:
-            print(f"Transaction UID: {response['transaction_uid']}")
-            print("Keep this UID for future state changes to this workitem")
-
-        # Display any warnings
-        if isinstance(response, dict) and "warning" in response:
-            print(f"Warning: {response['warning']}")
-
-        # Display full response if verbose
-        if args.verbose and isinstance(response, dict) and "response" in response:
-            print("\nFull response:")
-            print(json.dumps(response["response"], indent=2))
-
-        sys.exit(0)
-    else:
-        print(f"Failed to change workitem state: {response}")
-        sys.exit(1)
-
-
-def _handle_cancel_request_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the request cancellation command."""
-    # Request cancellation
-    success, response = client.request_cancellation(args.workitem_uid, args.reason, args.contact_name, args.contact_uri)
-
-    if not success:
-        print(f"Failed to request cancellation: {response}")
-        sys.exit(1)
-
-    print("Cancellation request sent successfully")
-
-    # Display any warnings
-    if isinstance(response, dict) and "warning" in response:
-        print(f"Warning: {response['warning']}")
-
-    # Display full response if available and verbose
-    if args.verbose and isinstance(response, dict) and "response" in response:
-        print("\nFull response:")
-        print(json.dumps(response["response"], indent=2))
-
-    # Include note about processing
-    print("\nNote: The cancellation request has been accepted by the server, but the workitem")
-    print("owner is not obliged to honor the request and may not receive notification.")
-
-    sys.exit(0)
-
-
-def _handle_subscribe_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the subscribe command."""
-    # Check if AE Title is provided
-    if not args.aetitle:
-        print("Error: AE Title (--aetitle) is required for subscription operations")
-        sys.exit(1)
-
-    # Handle different subscription types
-    if args.worklist:
-        success, response = client.subscribe_to_worklist(args.deletion_lock)
-        subscription_type = "worklist"
-    elif args.filtered_worklist:
-        # Parse filter parameters
-        filter_params = {}
-        for param in args.filter:
-            if "=" in param:
-                key, value = param.split("=", 1)
-                filter_params[key] = value
-            else:
-                logging.warning(f"Ignoring invalid filter parameter (missing '='): {param}")
-
-        if not filter_params:
-            logging.error("Filtered worklist subscription requires at least one filter parameter")
-            sys.exit(1)
-
-        success, response = client.subscribe_to_filtered_worklist(filter_params, args.deletion_lock)
-        subscription_type = "filtered worklist"
-    else:  # workitem
-        success, response = client.subscribe_to_workitem(args.workitem, args.deletion_lock)
-        subscription_type = f"workitem {args.workitem}"
-
-    if success:
-        print(f"Successfully subscribed to {subscription_type}")
-
-        # Display WebSocket URL if available
-        if isinstance(response, dict) and "ws_url" in response:
-            print(f"WebSocket URL: {response['ws_url']}")
-
-        # Display any warnings
-        if isinstance(response, dict) and "warning" in response:
-            print(f"Warning: {response['warning']}")
-
-        # Start monitoring if requested
-        if args.monitor:
-            print("\nStarting event monitoring. Press Ctrl+C to stop.")
-
-            # Set up signal handler for graceful shutdown
-            def signal_handler(sig, frame) -> None:  # noqa: ANN001
-                print("\nShutting down...")
-                client.disconnect()
-                sys.exit(0)
-
-            signal.signal(signal.SIGINT, signal_handler)
-
-            # Connect to WebSocket and start receiving events
-            # assign a callback to perform application specific processing
-            client.connect_websocket(event_callback=_event_handler)
-
-            # Keep the main thread alive
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                client.disconnect()
-
-        sys.exit(0)
-    else:
-        print(f"Failed to subscribe to {subscription_type}: {response}")
-        sys.exit(1)
-
-
-def _handle_unsubscribe_command(client: UPSRSClient, args: argparse.Namespace) -> None:
-    """Handle the unsubscribe command."""
-    # Check if AE Title is provided
-    if not args.aetitle:
-        print("Error: AE Title (--aetitle) is required for subscription operations")
-        sys.exit(1)
-
-    # Handle different subscription types
-    if args.worklist:
-        success, response = client.unsubscribe_from_worklist(args.deletion_lock)
-        subscription_type = "worklist"
-    elif args.filtered_worklist:
-        # Parse filter parameters
-        filter_params = {}
-        for param in args.filter:
-            if "=" in param:
-                key, value = param.split("=", 1)
-                filter_params[key] = value
-            else:
-                logging.warning(f"Ignoring invalid filter parameter (missing '='): {param}")
-
-        if not filter_params:
-            logging.error("Filtered worklist subscription requires at least one filter parameter")
-            sys.exit(1)
-
-        success, response = client.unsubscribe_from_filtered_worklist(filter_params, args.deletion_lock)
-        subscription_type = "filtered worklist"
-    else:  # workitem
-        success, response = client.unsubscribe_from_workitem(args.workitem, args.deletion_lock)
-        subscription_type = f"workitem {args.workitem}"
-
-    if success:
-        print(f"Successfully unsubscribed from {subscription_type}")
-
-        # Display any warnings
-        if isinstance(response, dict) and "warning" in response:
-            print(f"Warning: {response['warning']}")
-
-        sys.exit(0)
-    else:
-        print(f"Failed to unsubscribe from {subscription_type}: {response}")
-        sys.exit(1)
+    _cli_event_handler(event_data)
 
 
 if __name__ == "__main__":
