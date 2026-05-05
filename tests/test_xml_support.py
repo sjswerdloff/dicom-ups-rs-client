@@ -203,13 +203,12 @@ class TestMakeHeaders:
         assert headers["Cache-Control"] == "no-cache"
         assert headers["Content-Type"] == CONTENT_TYPE_JSON
 
-    def test_extra_headers_do_not_override_content_type(self) -> None:
-        """Contract: extra dict cannot override Content-Type (last-write wins)."""
-        # The make_headers function merges extra AFTER setting the content-type
-        # keys, so extra CAN override them. This test documents current behavior.
-        headers = make_headers(CONTENT_TYPE_JSON, extra={"Content-Type": "text/plain"})
-        # extra overrides the default — document this as expected behavior
-        assert headers["Content-Type"] == "text/plain"
+    def test_extra_headers_cannot_override_content_type(self) -> None:
+        """Contract: extra dict cannot override Content-Type or Accept."""
+        headers = make_headers(CONTENT_TYPE_JSON, extra={"Content-Type": "text/plain", "Accept": "text/html"})
+        # Protected headers are filtered out — content_type always wins
+        assert headers["Content-Type"] == CONTENT_TYPE_JSON
+        assert headers["Accept"] == CONTENT_TYPE_JSON
 
 
 # ---------------------------------------------------------------------------

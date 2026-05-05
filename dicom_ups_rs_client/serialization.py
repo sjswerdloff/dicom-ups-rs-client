@@ -51,7 +51,10 @@ def make_headers(content_type: str, extra: dict[str, str] | None = None) -> dict
         "Accept": content_type,
     }
     if extra:
-        headers.update(extra)
+        # Filter out Content-Type and Accept to prevent accidental override
+        protected = {"content-type", "accept"}
+        filtered = {k: v for k, v in extra.items() if k.lower() not in protected}
+        headers.update(filtered)
     return headers
 
 

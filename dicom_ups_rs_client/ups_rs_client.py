@@ -1405,7 +1405,7 @@ class UPSRSClient:
                     break
 
                 retry_count += 1
-                if retry_count > max_retries:
+                if retry_count >= max_retries:
                     self.logger.error(f"Maximum retries exceeded. Last error: {e}")
                     self.running = False
                     break
