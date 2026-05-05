@@ -237,7 +237,7 @@ def test_send_request_custom_success_code(mock_ups_rs_client: UPSRSClient, respo
 
 def test_event_handler() -> None:
     """Test the event_handler function."""
-    from dicom_ups_rs_client.ups_rs_client import _event_handler as event_handler
+    from dicom_ups_rs_client.cli_commands import _event_handler as event_handler
 
     # Create a test event
     event_data = {

@@ -1426,28 +1426,3 @@ class UPSRSClient:
 
         self.ws_connection = None
         self.logger.info("WebSocket client stopped")
-
-
-# Keep backward-compatible entry points — the real implementations are in cli.py
-def main() -> None:
-    """Execute the CLI entry point.  Implementation lives in :mod:`dicom_ups_rs_client.cli`."""
-    from dicom_ups_rs_client.cli import main as _main
-
-    _main()
-
-
-def _event_handler(event_data: dict[str, Any]) -> None:
-    """
-    Handle incoming UPS-RS events (re-exported from cli module for backward compatibility).
-
-    Args:
-        event_data: dictionary containing event information
-
-    """
-    from dicom_ups_rs_client.cli import _event_handler as _cli_event_handler
-
-    _cli_event_handler(event_data)
-
-
-if __name__ == "__main__":
-    main()
