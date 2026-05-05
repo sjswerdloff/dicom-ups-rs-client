@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from dicom_ups_rs_client.ups_rs_client import main  # type: ignore[attr-defined]
+from dicom_ups_rs_client.cli import main
 
 # ---------------------------------------------------------------------------
 # Issue #14 — Require --client-cert when --client-cert-key is given
