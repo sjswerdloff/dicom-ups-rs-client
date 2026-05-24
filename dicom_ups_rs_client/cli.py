@@ -18,6 +18,7 @@ from dicom_ups_rs_client.cli_commands import (
     handle_update_command,
 )
 from dicom_ups_rs_client.serialization import CONTENT_TYPE_JSON, CONTENT_TYPE_XML
+from dicom_ups_rs_client.ups_rs_client import SERVER_FLAVORS
 
 
 def main() -> None:
@@ -69,6 +70,17 @@ def main() -> None:
         choices=[CONTENT_TYPE_JSON, CONTENT_TYPE_XML],
         default=CONTENT_TYPE_JSON,
         help="MIME type for request/response content negotiation",
+    )
+    parser.add_argument(
+        "--server-flavor",
+        choices=list(SERVER_FLAVORS),
+        default="standard",
+        help=(
+            "URL convention to use. 'standard' (default) follows PS3.18 strictly. "
+            "'dcm4chee' adapts to dcm4chee-arc's non-conformant convention: requester AET "
+            "as a path segment on state/cancelrequest, and Transaction UID in the request "
+            "body on update."
+        ),
     )
 
     # Create subparsers for different commands
@@ -276,6 +288,7 @@ def main() -> None:
         client_cert=client_cert,
         websocket_url_override=args.websocket_url_override,
         content_type=args.content_type,
+        server_flavor=args.server_flavor,
     )
 
     try:

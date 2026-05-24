@@ -44,7 +44,7 @@ def test_workitem_lifecycle(mock_ups_rs_client: UPSRSClient, sample_workitem: di
     update_data = {"00741204": {"vr": "LO", "Value": ["Updated Procedure Label"]}}
 
     update_response = response_factory(status_code=200, json_data={"status": "Success"})
-    mock_ups_rs_client.session.add_response("PUT", f"http://example.com/dicom-web/workitems/{workitem_uid}", update_response)
+    mock_ups_rs_client.session.add_response("POST", f"http://example.com/dicom-web/workitems/{workitem_uid}", update_response)
 
     # Call update method (no transaction UID needed for SCHEDULED workitems)
     success, result = mock_ups_rs_client.update_workitem(workitem_uid, None, update_data)
