@@ -7,6 +7,7 @@ import logging
 import sys
 
 import dicom_ups_rs_client.ups_rs_client as _ups_rs_module
+from dicom_ups_rs_client.ups_rs_client import SERVER_FLAVORS
 from dicom_ups_rs_client.cli_commands import (
     handle_cancel_request_command,
     handle_change_state_command,
@@ -72,7 +73,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--server-flavor",
-        choices=["standard", "dcm4chee"],
+        choices=list(SERVER_FLAVORS),
         default="standard",
         help=(
             "URL convention to use. 'standard' (default) follows PS3.18 strictly. "

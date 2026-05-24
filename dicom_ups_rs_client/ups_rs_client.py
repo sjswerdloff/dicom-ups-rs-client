@@ -2,11 +2,14 @@
 
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 import requests
 from pydicom.uid import generate_uid
+
+ServerFlavor = Literal["standard", "dcm4chee"]
+SERVER_FLAVORS: tuple[ServerFlavor, ...] = ("standard", "dcm4chee")
 
 from dicom_ups_rs_client.async_operations import AsyncOperationsMixin
 from dicom_ups_rs_client.enums import InputReadinessState, UPSState
@@ -56,7 +59,7 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
         client_cert: str | tuple[str, str] | None = None,
         websocket_url_override: str | None = None,
         content_type: str = CONTENT_TYPE_JSON,
-        server_flavor: str = "standard",
+        server_flavor: ServerFlavor = "standard",
     ) -> None:
         """
         Initialize the UPS-RS client.
@@ -85,15 +88,17 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
                 WebSocket notifications always use JSON per PS3.18 Section 8.10.5.
             server_flavor: URL convention to use. ``"standard"`` (default) follows
                 PS3.18 strictly: requester AET as ``?requester=`` query parameter
-                on state/cancelrequest, Transaction UID as ``?Transaction-uid=``
-                query parameter on update. ``"dcm4chee"`` adapts to dcm4chee-arc's
-                non-conformant URL convention: requester AET as a path segment on
-                state/cancelrequest, Transaction UID in the request body on update.
+                on state/cancelrequest (Optional per PS3.18 Table 11.7.2.1-1, so
+                omitted when ``aetitle`` is unset), Transaction UID as
+                ``?Transaction-uid=`` query parameter on update. ``"dcm4chee"``
+                adapts to dcm4chee-arc's non-conformant URL convention: requester
+                AET as a path segment on state/cancelrequest (always required),
+                Transaction UID in the request body on update.
 
         """
-        if server_flavor not in ("standard", "dcm4chee"):
-            raise ValueError(f"server_flavor must be 'standard' or 'dcm4chee', got {server_flavor!r}")
-        self.server_flavor = server_flavor
+        if server_flavor not in SERVER_FLAVORS:
+            raise ValueError(f"server_flavor must be one of {SERVER_FLAVORS}, got {server_flavor!r}")
+        self.server_flavor: ServerFlavor = server_flavor
         self.base_url = base_url.rstrip("/")
         self.aetitle = aetitle
         self.timeout = timeout
@@ -354,6 +359,12 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
         # the request body instead.
         if transaction_uid and self.server_flavor == "dcm4chee":
             endpoint = f"{self.base_url}/workitems/{workitem_uid}"
+            existing_txn = update_data.get("00081195")
+            if existing_txn is not None and existing_txn.get("Value") != [transaction_uid]:
+                return False, (
+                    "update_data already contains a Transaction UID (0008,1195) that differs "
+                    "from the transaction_uid argument; refusing to silently overwrite."
+                )
             update_data = {**update_data, "00081195": {"vr": "UI", "Value": [transaction_uid]}}
         elif transaction_uid:
             endpoint = f"{self.base_url}/workitems/{workitem_uid}?Transaction-uid={transaction_uid}"
@@ -417,15 +428,17 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
                 f"Invalid DICOM UID format for transaction_uid: {transaction_uid}",
             )
 
-        # Per PS3.18 11.7.1: the requester AET is a query parameter on the URI
-        # (URI template /workitems/{workitem}/state{?requester}). dcm4chee-arc
-        # is non-conformant and requires it as a path segment instead.
-        if not self.aetitle:
-            return False, "aetitle is required for state change (used as requester AET)"
+        # Per PS3.18 11.7 Table 11.7.2.1-1: the "requester" query parameter is
+        # Optional (Usage: O). dcm4chee-arc is non-conformant: it requires the
+        # requester AET as a path segment, with no way to omit it.
         if self.server_flavor == "dcm4chee":
+            if not self.aetitle:
+                return False, "aetitle is required for state change in 'dcm4chee' flavor (path-segment requester AET)"
             endpoint = f"{self.base_url}/workitems/{workitem_uid}/state/{self.aetitle}"
-        else:
+        elif self.aetitle:
             endpoint = f"{self.base_url}/workitems/{workitem_uid}/state?requester={self.aetitle}"
+        else:
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/state"
 
         headers = self._make_headers()
 
@@ -471,15 +484,16 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
         if not self.validate_uid(workitem_uid):
             return False, f"Invalid DICOM UID format for workitem_uid: {workitem_uid}"
 
-        # Per PS3.18 11.8.1: the requester AET is a query parameter on the URI
-        # (URI template /workitems/{workitem}/cancelrequest{?requester}). dcm4chee-arc
-        # is non-conformant and requires it as a path segment instead.
-        if not self.aetitle:
-            return False, "aetitle is required for cancel request (used as requester AET)"
+        # Per PS3.18 11.8 (references Table 11.7.2.1-1): "requester" is Optional.
+        # dcm4chee-arc requires it as a path segment with no way to omit it.
         if self.server_flavor == "dcm4chee":
+            if not self.aetitle:
+                return False, "aetitle is required for cancel request in 'dcm4chee' flavor (path-segment requester AET)"
             endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest/{self.aetitle}"
-        else:
+        elif self.aetitle:
             endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest?requester={self.aetitle}"
+        else:
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest"
 
         # Prepare payload with cancellation request information
         payload: dict[str, Any] = {}
