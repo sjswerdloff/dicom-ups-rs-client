@@ -18,6 +18,12 @@ def _hang_future() -> asyncio.Future:
     Python 3.14 removed the implicit thread-default event loop, so ``asyncio.Future()``
     called from synchronous code now raises ``RuntimeError: There is no current event
     loop``. Provide one explicitly so this works on 3.10 through 3.14+.
+
+    Note: this sets the loop as the thread default. Sourcery flagged that as global
+    state mutation; a non-mutating variant attaching the future to a module-private
+    loop was tried and broke the tests (the future has to share a loop with the code
+    that awaits it inside the websocket handler thread). The mutation is contained
+    to this test module and accepted as the cost of the test design.
     """
     try:
         loop = asyncio.get_event_loop()

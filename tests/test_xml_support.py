@@ -661,6 +661,27 @@ class TestContentTypeConfiguration:
 # ---------------------------------------------------------------------------
 
 
+def _make_json_status_response(
+    factory: Callable[..., XmlMockResponse],
+    *,
+    status_code: int = 200,
+    payload: dict[str, Any] | None = None,
+) -> XmlMockResponse:
+    """
+    Build an XML-mode mock response whose body and headers indicate a JSON status payload.
+
+    Most UPS-RS write operations have an XML request body but the server returns a
+    short JSON status object. Factoring this 5-line setup keeps the tests below
+    focused on the URL-shape and body assertions that actually matter.
+    """
+    response = factory(status_code=status_code)
+    response._json_data = payload if payload is not None else {}
+    response.text = "{}"
+    response.content = b"{}"
+    response.headers["Content-Type"] = CONTENT_TYPE_JSON
+    return response
+
+
 class TestXmlClientUpdateUrlShape:
     """Contracts for the URL form used by update_workitem in XML mode."""
 
@@ -670,11 +691,7 @@ class TestXmlClientUpdateUrlShape:
         """PS3.18 §11.6.1: Transaction UID is the 'Transaction-uid' query parameter."""
         uid = "1.2.3.4.5"
         txn_uid = "5.6.7.8.9"
-        response = xml_response_factory(status_code=200)
-        response._json_data = {"status": "OK"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={"status": "OK"})
         mock_ups_rs_xml_client.session.add_response(
             "POST", rf"http://example.com/dicom-web/workitems/{uid}\?Transaction-uid={txn_uid}", response
         )
@@ -698,11 +715,7 @@ class TestXmlClientChangeStateAllStates:
         """Each terminal state lands in the XML body as a CS attribute with Transaction UID."""
         uid = "1.2.3.4.5"
         txn_uid = "9.8.7.6.5"
-        response = xml_response_factory(status_code=200)
-        response._json_data = {"status": "OK"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={"status": "OK"})
         mock_ups_rs_xml_client.session.add_response("PUT", rf"http://example.com/dicom-web/workitems/{uid}/state", response)
 
         mock_ups_rs_xml_client.change_workitem_state(uid, state, transaction_uid=txn_uid)
@@ -719,11 +732,7 @@ class TestXmlClientChangeStateAllStates:
         """PS3.18 §11.7.1: requester AE Title is the 'requester' query parameter (standard flavor)."""
         uid = "1.2.3.4.5"
         txn_uid = "9.8.7.6.5"
-        response = xml_response_factory(status_code=200)
-        response._json_data = {"status": "OK"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={"status": "OK"})
         mock_ups_rs_xml_client.session.add_response("PUT", rf"http://example.com/dicom-web/workitems/{uid}/state", response)
 
         mock_ups_rs_xml_client.change_workitem_state(uid, "IN PROGRESS", transaction_uid=txn_uid)
@@ -738,11 +747,7 @@ class TestXmlClientRequestCancellationUrlShape:
     def test_requester_aetitle_in_url_query(self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable) -> None:
         """PS3.18 §11.8: requester AE Title is the 'requester' query parameter (standard flavor)."""
         uid = "1.2.3.4.5"
-        response = xml_response_factory(status_code=202)
-        response._json_data = {"status": "Accepted"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=202, payload={"status": "Accepted"})
         mock_ups_rs_xml_client.session.add_response(
             "POST", rf"http://example.com/dicom-web/workitems/{uid}/cancelrequest", response
         )
@@ -758,11 +763,7 @@ class TestXmlClientSubscriptions:
 
     def test_subscribe_to_worklist_url(self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable) -> None:
         """Global worklist subscribe POSTs to the well-known UID with the subscriber AET in the path."""
-        response = xml_response_factory(status_code=201)
-        response._json_data = {}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=201, payload={})
         mock_ups_rs_xml_client.session.add_response(
             "POST", r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5/subscribers/TEST_AE", response
         )
@@ -777,11 +778,7 @@ class TestXmlClientSubscriptions:
         self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
     ) -> None:
         """Filtered worklist subscribe includes filter as URL-encoded query parameter."""
-        response = xml_response_factory(status_code=201)
-        response._json_data = {}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=201, payload={})
         mock_ups_rs_xml_client.session.add_response(
             "POST",
             r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/TEST_AE.*",
@@ -801,11 +798,7 @@ class TestXmlClientSubscriptions:
         self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
     ) -> None:
         """Unsubscribe is HTTP DELETE on the subscriber resource."""
-        response = xml_response_factory(status_code=200)
-        response._json_data = {}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={})
         mock_ups_rs_xml_client.session.add_response(
             "DELETE", r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5/subscribers/TEST_AE", response
         )
@@ -820,11 +813,7 @@ class TestXmlClientSubscriptions:
     ) -> None:
         """Per-workitem subscribe POSTs to /workitems/{UID}/subscribers/{AET}."""
         uid = "1.2.3.4.5"
-        response = xml_response_factory(status_code=201)
-        response._json_data = {}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=201, payload={})
         mock_ups_rs_xml_client.session.add_response(
             "POST", rf"http://example.com/dicom-web/workitems/{uid}/subscribers/TEST_AE", response
         )
@@ -866,11 +855,7 @@ class TestXmlClientDcm4cheeFlavor:
         """dcm4chee-flavor update places Transaction UID (0008,1195) in the body, not the URL."""
         uid = "1.2.3.4.5"
         txn_uid = "5.6.7.8.9"
-        response = xml_response_factory(status_code=200)
-        response._json_data = {"status": "OK"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={"status": "OK"})
         mock_ups_rs_xml_dcm4chee_client.session.add_response(
             "POST", rf"http://example.com/dicom-web/workitems/{uid}$", response
         )
@@ -889,11 +874,7 @@ class TestXmlClientDcm4cheeFlavor:
         """dcm4chee-flavor state change uses /state/{AET} path segment, not ?requester=."""
         uid = "1.2.3.4.5"
         txn_uid = "9.8.7.6.5"
-        response = xml_response_factory(status_code=200)
-        response._json_data = {"status": "OK"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=200, payload={"status": "OK"})
         mock_ups_rs_xml_dcm4chee_client.session.add_response(
             "PUT", rf"http://example.com/dicom-web/workitems/{uid}/state/TEST_AE", response
         )
@@ -909,11 +890,7 @@ class TestXmlClientDcm4cheeFlavor:
     ) -> None:
         """dcm4chee-flavor cancelrequest uses /cancelrequest/{AET} path segment."""
         uid = "1.2.3.4.5"
-        response = xml_response_factory(status_code=202)
-        response._json_data = {"status": "Accepted"}
-        response.text = "{}"
-        response.content = b"{}"
-        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        response = _make_json_status_response(xml_response_factory, status_code=202, payload={"status": "Accepted"})
         mock_ups_rs_xml_dcm4chee_client.session.add_response(
             "POST", rf"http://example.com/dicom-web/workitems/{uid}/cancelrequest/TEST_AE", response
         )
