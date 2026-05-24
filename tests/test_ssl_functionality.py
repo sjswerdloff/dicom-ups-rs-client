@@ -11,6 +11,22 @@ import pytest
 from dicom_ups_rs_client.ups_rs_client import UPSRSClient
 
 
+def _hang_future() -> asyncio.Future:
+    """
+    Create a never-completing Future for use as an AsyncMock side_effect sentinel.
+
+    Python 3.14 removed the implicit thread-default event loop, so ``asyncio.Future()``
+    called from synchronous code now raises ``RuntimeError: There is no current event
+    loop``. Provide one explicitly so this works on 3.10 through 3.14+.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.create_future()
+
+
 @pytest.fixture
 def ssl_client() -> Generator[UPSRSClient, None, None]:
     """Fixture that provides a UPS-RS client with common setup and guaranteed cleanup."""
@@ -63,7 +79,7 @@ def test_ssl_websocket_connection_with_disabled_verification() -> None:
             mock_connect.return_value = mock_websocket
 
             # Make recv() return a valid JSON string once and then never complete
-            future = asyncio.Future()
+            future = _hang_future()
             mock_websocket.__aenter__.return_value.recv = AsyncMock(
                 side_effect=["{}"] + [future] * 10  # First return valid JSON, then hang
             )
@@ -123,7 +139,7 @@ def test_ssl_websocket_connection_with_custom_ca_bundle() -> None:
                 # Create a proper mock for the websocket
                 mock_websocket = AsyncMock()
                 # Return a valid JSON string once, then futures that never complete
-                future = asyncio.Future()
+                future = _hang_future()
                 mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
@@ -175,7 +191,7 @@ def test_ssl_websocket_connection_with_client_cert() -> None:
                 # Create a proper mock for the websocket
                 mock_websocket = AsyncMock()
                 # Return a valid JSON string once, then futures that never complete
-                future = asyncio.Future()
+                future = _hang_future()
                 mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
@@ -223,7 +239,7 @@ def test_non_ssl_websocket_connection() -> None:
             # Create a proper mock for the websocket
             mock_websocket = AsyncMock()
             # Return a valid JSON string once, then futures that never complete
-            future = asyncio.Future()
+            future = _hang_future()
             mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
             mock_connect.return_value = mock_websocket
 
@@ -288,7 +304,7 @@ async def test_ssl_context_configuration() -> None:
                 # Create a mock for the websocket that returns a valid JSON string once
                 mock_websocket = AsyncMock()
                 # Return a valid JSON string once, then futures that never complete
-                future = asyncio.Future()
+                future = _hang_future()
                 mock_websocket.__aenter__.return_value.recv = AsyncMock(side_effect=["{}"] + [future] * 10)
                 mock_connect.return_value = mock_websocket
 
