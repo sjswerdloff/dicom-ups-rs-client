@@ -654,3 +654,272 @@ class TestContentTypeConfiguration:
             headers = client._make_headers()
             assert headers["Content-Type"] == CONTENT_TYPE_XML
             assert headers["Accept"] == CONTENT_TYPE_XML
+
+
+# ---------------------------------------------------------------------------
+# XML round-trip regression coverage for PS3.18 wire-form correctness
+# ---------------------------------------------------------------------------
+
+
+class TestXmlClientUpdateUrlShape:
+    """Contracts for the URL form used by update_workitem in XML mode."""
+
+    def test_transaction_uid_is_query_param_with_canonical_case(
+        self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """PS3.18 §11.6.1: Transaction UID is the 'Transaction-uid' query parameter."""
+        uid = "1.2.3.4.5"
+        txn_uid = "5.6.7.8.9"
+        response = xml_response_factory(status_code=200)
+        response._json_data = {"status": "OK"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}\?Transaction-uid={txn_uid}", response
+        )
+
+        mock_ups_rs_xml_client.update_workitem(uid, txn_uid, {"00741204": {"vr": "LO", "Value": ["x"]}})
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert req["method"] == "POST"
+        assert f"?Transaction-uid={txn_uid}" in req["url"]
+        # Standard flavor: txn UID is in the URL, not the body
+        assert b"00081195" not in req.get("data", b"")
+
+
+class TestXmlClientChangeStateAllStates:
+    """Cover IN PROGRESS / COMPLETED / CANCELED state transitions in XML mode."""
+
+    @pytest.mark.parametrize("state", ["IN PROGRESS", "COMPLETED", "CANCELED"])
+    def test_state_value_serialized_in_xml_body(
+        self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable, state: str
+    ) -> None:
+        """Each terminal state lands in the XML body as a CS attribute with Transaction UID."""
+        uid = "1.2.3.4.5"
+        txn_uid = "9.8.7.6.5"
+        response = xml_response_factory(status_code=200)
+        response._json_data = {"status": "OK"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response("PUT", rf"http://example.com/dicom-web/workitems/{uid}/state", response)
+
+        mock_ups_rs_xml_client.change_workitem_state(uid, state, transaction_uid=txn_uid)
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        body = req.get("data", b"")
+        assert isinstance(body, bytes)
+        assert b"NativeDicomModel" in body
+        assert state.encode() in body
+        # Transaction UID (0008,1195) must accompany every state change
+        assert b"00081195" in body or txn_uid.encode() in body
+
+    def test_requester_aetitle_in_url_query(self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable) -> None:
+        """PS3.18 §11.7.1: requester AE Title is the 'requester' query parameter (standard flavor)."""
+        uid = "1.2.3.4.5"
+        txn_uid = "9.8.7.6.5"
+        response = xml_response_factory(status_code=200)
+        response._json_data = {"status": "OK"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response("PUT", rf"http://example.com/dicom-web/workitems/{uid}/state", response)
+
+        mock_ups_rs_xml_client.change_workitem_state(uid, "IN PROGRESS", transaction_uid=txn_uid)
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert "?requester=TEST_AE" in req["url"]
+
+
+class TestXmlClientRequestCancellationUrlShape:
+    """URL-shape contract for request_cancellation in XML mode (PS3.18 §11.8)."""
+
+    def test_requester_aetitle_in_url_query(self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable) -> None:
+        """PS3.18 §11.8: requester AE Title is the 'requester' query parameter (standard flavor)."""
+        uid = "1.2.3.4.5"
+        response = xml_response_factory(status_code=202)
+        response._json_data = {"status": "Accepted"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}/cancelrequest", response
+        )
+
+        mock_ups_rs_xml_client.request_cancellation(uid, reason="end-to-end")
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert "?requester=TEST_AE" in req["url"]
+
+
+class TestXmlClientSubscriptions:
+    """Subscribe / unsubscribe URL contracts in XML mode."""
+
+    def test_subscribe_to_worklist_url(self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable) -> None:
+        """Global worklist subscribe POSTs to the well-known UID with the subscriber AET in the path."""
+        response = xml_response_factory(status_code=201)
+        response._json_data = {}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "POST", r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5/subscribers/TEST_AE", response
+        )
+
+        mock_ups_rs_xml_client.subscribe_to_worklist()
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert req["method"] == "POST"
+        assert req["url"].endswith("/workitems/1.2.840.10008.5.1.4.34.5/subscribers/TEST_AE")
+
+    def test_subscribe_to_filtered_worklist_encodes_filter(
+        self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """Filtered worklist subscribe includes filter as URL-encoded query parameter."""
+        response = xml_response_factory(status_code=201)
+        response._json_data = {}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "POST",
+            r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/TEST_AE.*",
+            response,
+        )
+
+        mock_ups_rs_xml_client.subscribe_to_filtered_worklist({"00741000": "SCHEDULED"})
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        # urlencode percent-encodes the '=' inside the DICOM filter syntax
+        from urllib.parse import parse_qs, urlparse
+
+        filter_value = parse_qs(urlparse(req["url"]).query)["filter"][0]
+        assert filter_value == "00741000=SCHEDULED"
+
+    def test_unsubscribe_from_worklist_uses_delete(
+        self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """Unsubscribe is HTTP DELETE on the subscriber resource."""
+        response = xml_response_factory(status_code=200)
+        response._json_data = {}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "DELETE", r"http://example.com/dicom-web/workitems/1.2.840.10008.5.1.4.34.5/subscribers/TEST_AE", response
+        )
+
+        mock_ups_rs_xml_client.unsubscribe_from_worklist()
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert req["method"] == "DELETE"
+
+    def test_subscribe_to_specific_workitem_url(
+        self, mock_ups_rs_xml_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """Per-workitem subscribe POSTs to /workitems/{UID}/subscribers/{AET}."""
+        uid = "1.2.3.4.5"
+        response = xml_response_factory(status_code=201)
+        response._json_data = {}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_client.session.add_response(
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}/subscribers/TEST_AE", response
+        )
+
+        mock_ups_rs_xml_client.subscribe_to_workitem(uid)
+
+        req = mock_ups_rs_xml_client.session.requests[0]
+        assert req["url"].endswith(f"/workitems/{uid}/subscribers/TEST_AE")
+
+
+# ---------------------------------------------------------------------------
+# dcm4chee-flavor URL/body shape regression (server_flavor="dcm4chee")
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_ups_rs_xml_dcm4chee_client(mock_session_xml: object) -> UPSRSClient:
+    """XML client configured for dcm4chee's non-conformant URL convention."""
+    with patch("requests.Session", return_value=mock_session_xml):
+        client = UPSRSClient(
+            base_url="http://example.com/dicom-web",
+            aetitle="TEST_AE",
+            timeout=30,
+            max_retries=0,
+            retry_delay=0,
+            content_type=CONTENT_TYPE_XML,
+            server_flavor="dcm4chee",
+        )
+        client.session = mock_session_xml  # type: ignore[assignment]
+        return client
+
+
+class TestXmlClientDcm4cheeFlavor:
+    """dcm4chee flavor: requester as path segment, Transaction UID in body for update."""
+
+    def test_update_puts_transaction_uid_in_body_not_url(
+        self, mock_ups_rs_xml_dcm4chee_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """dcm4chee-flavor update places Transaction UID (0008,1195) in the body, not the URL."""
+        uid = "1.2.3.4.5"
+        txn_uid = "5.6.7.8.9"
+        response = xml_response_factory(status_code=200)
+        response._json_data = {"status": "OK"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_dcm4chee_client.session.add_response(
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}$", response
+        )
+
+        mock_ups_rs_xml_dcm4chee_client.update_workitem(uid, txn_uid, {"00741204": {"vr": "LO", "Value": ["x"]}})
+
+        req = mock_ups_rs_xml_dcm4chee_client.session.requests[0]
+        assert "Transaction-uid" not in req["url"]
+        # Transaction UID tag must be in the serialized XML body
+        body = req.get("data", b"")
+        assert b"00081195" in body or txn_uid.encode() in body
+
+    def test_change_state_puts_requester_in_path(
+        self, mock_ups_rs_xml_dcm4chee_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """dcm4chee-flavor state change uses /state/{AET} path segment, not ?requester=."""
+        uid = "1.2.3.4.5"
+        txn_uid = "9.8.7.6.5"
+        response = xml_response_factory(status_code=200)
+        response._json_data = {"status": "OK"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_dcm4chee_client.session.add_response(
+            "PUT", rf"http://example.com/dicom-web/workitems/{uid}/state/TEST_AE", response
+        )
+
+        mock_ups_rs_xml_dcm4chee_client.change_workitem_state(uid, "IN PROGRESS", transaction_uid=txn_uid)
+
+        req = mock_ups_rs_xml_dcm4chee_client.session.requests[0]
+        assert req["url"].endswith("/state/TEST_AE")
+        assert "?requester=" not in req["url"]
+
+    def test_cancelrequest_puts_requester_in_path(
+        self, mock_ups_rs_xml_dcm4chee_client: UPSRSClient, xml_response_factory: Callable
+    ) -> None:
+        """dcm4chee-flavor cancelrequest uses /cancelrequest/{AET} path segment."""
+        uid = "1.2.3.4.5"
+        response = xml_response_factory(status_code=202)
+        response._json_data = {"status": "Accepted"}
+        response.text = "{}"
+        response.content = b"{}"
+        response.headers["Content-Type"] = CONTENT_TYPE_JSON
+        mock_ups_rs_xml_dcm4chee_client.session.add_response(
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}/cancelrequest/TEST_AE", response
+        )
+
+        mock_ups_rs_xml_dcm4chee_client.request_cancellation(uid, reason="x")
+
+        req = mock_ups_rs_xml_dcm4chee_client.session.requests[0]
+        assert req["url"].endswith("/cancelrequest/TEST_AE")
+        assert "?requester=" not in req["url"]
