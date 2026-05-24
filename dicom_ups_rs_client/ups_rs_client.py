@@ -56,6 +56,7 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
         client_cert: str | tuple[str, str] | None = None,
         websocket_url_override: str | None = None,
         content_type: str = CONTENT_TYPE_JSON,
+        server_flavor: str = "standard",
     ) -> None:
         """
         Initialize the UPS-RS client.
@@ -82,8 +83,17 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
                 Defaults to ``application/dicom+json``.
                 Use ``application/dicom+xml`` for XML content type.
                 WebSocket notifications always use JSON per PS3.18 Section 8.10.5.
+            server_flavor: URL convention to use. ``"standard"`` (default) follows
+                PS3.18 strictly: requester AET as ``?requester=`` query parameter
+                on state/cancelrequest, Transaction UID as ``?Transaction-uid=``
+                query parameter on update. ``"dcm4chee"`` adapts to dcm4chee-arc's
+                non-conformant URL convention: requester AET as a path segment on
+                state/cancelrequest, Transaction UID in the request body on update.
 
         """
+        if server_flavor not in ("standard", "dcm4chee"):
+            raise ValueError(f"server_flavor must be 'standard' or 'dcm4chee', got {server_flavor!r}")
+        self.server_flavor = server_flavor
         self.base_url = base_url.rstrip("/")
         self.aetitle = aetitle
         self.timeout = timeout
@@ -338,18 +348,23 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
                 f"Invalid DICOM UID format for transaction_uid: {transaction_uid}",
             )
 
-        # Set endpoint URL with transaction-uid query parameter
-        if transaction_uid:
-            endpoint = f"{self.base_url}/workitems/{workitem_uid}?transaction-uid={transaction_uid}"
+        # Per PS3.18 11.6.1: Transaction UID is a query parameter on the URI
+        # (URI template /workitems/{workitem}{?Transaction-uid}). dcm4chee-arc
+        # is non-conformant and requires it as DICOM attribute (0008,1195) in
+        # the request body instead.
+        if transaction_uid and self.server_flavor == "dcm4chee":
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}"
+            update_data = {**update_data, "00081195": {"vr": "UI", "Value": [transaction_uid]}}
+        elif transaction_uid:
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}?Transaction-uid={transaction_uid}"
         else:
-            # Unless the assumption is that the procedure step state is SCHEDULED
-            # and one wants to test the UPS-RS server for its response to this.
-            # or test its response to a missing transaction uid when it is required
+            # Omitted: useful to test server response to a missing transaction UID
+            # when one is required (e.g. workitem is IN PROGRESS).
             endpoint = f"{self.base_url}/workitems/{workitem_uid}"
 
         headers = self._make_headers()
 
-        return self._send_request("PUT", endpoint, headers=headers, json_data=update_data)
+        return self._send_request("POST", endpoint, headers=headers, json_data=update_data)
 
     def change_workitem_state(
         self,
@@ -402,8 +417,15 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
                 f"Invalid DICOM UID format for transaction_uid: {transaction_uid}",
             )
 
-        # Set endpoint URL
-        endpoint = f"{self.base_url}/workitems/{workitem_uid}/state"
+        # Per PS3.18 11.7.1: the requester AET is a query parameter on the URI
+        # (URI template /workitems/{workitem}/state{?requester}). dcm4chee-arc
+        # is non-conformant and requires it as a path segment instead.
+        if not self.aetitle:
+            return False, "aetitle is required for state change (used as requester AET)"
+        if self.server_flavor == "dcm4chee":
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/state/{self.aetitle}"
+        else:
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/state?requester={self.aetitle}"
 
         headers = self._make_headers()
 
@@ -449,8 +471,15 @@ class UPSRSClient(WebSocketMixin, AsyncOperationsMixin, EventManagementMixin, Re
         if not self.validate_uid(workitem_uid):
             return False, f"Invalid DICOM UID format for workitem_uid: {workitem_uid}"
 
-        # Set endpoint URL
-        endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest"
+        # Per PS3.18 11.8.1: the requester AET is a query parameter on the URI
+        # (URI template /workitems/{workitem}/cancelrequest{?requester}). dcm4chee-arc
+        # is non-conformant and requires it as a path segment instead.
+        if not self.aetitle:
+            return False, "aetitle is required for cancel request (used as requester AET)"
+        if self.server_flavor == "dcm4chee":
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest/{self.aetitle}"
+        else:
+            endpoint = f"{self.base_url}/workitems/{workitem_uid}/cancelrequest?requester={self.aetitle}"
 
         # Prepare payload with cancellation request information
         payload: dict[str, Any] = {}

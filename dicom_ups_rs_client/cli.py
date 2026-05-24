@@ -70,6 +70,17 @@ def main() -> None:
         default=CONTENT_TYPE_JSON,
         help="MIME type for request/response content negotiation",
     )
+    parser.add_argument(
+        "--server-flavor",
+        choices=["standard", "dcm4chee"],
+        default="standard",
+        help=(
+            "URL convention to use. 'standard' (default) follows PS3.18 strictly. "
+            "'dcm4chee' adapts to dcm4chee-arc's non-conformant convention: requester AET "
+            "as a path segment on state/cancelrequest, and Transaction UID in the request "
+            "body on update."
+        ),
+    )
 
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
@@ -276,6 +287,7 @@ def main() -> None:
         client_cert=client_cert,
         websocket_url_override=args.websocket_url_override,
         content_type=args.content_type,
+        server_flavor=args.server_flavor,
     )
 
     try:

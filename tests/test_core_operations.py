@@ -332,9 +332,9 @@ def test_update_workitem(mock_ups_rs_client: UPSRSClient, response_factory: call
     transaction_uid = "5.6.7.8.9"
     update_data = {"00741204": {"vr": "LO", "Value": ["Updated Procedure"]}}
 
-    # Configure mock response
+    # Configure mock response (POST per PS3.18 §11.6.1; Transaction UID as query parameter)
     response = response_factory(status_code=200, json_data={"status": "Success"})
-    mock_ups_rs_client.session.add_response("PUT", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
+    mock_ups_rs_client.session.add_response("POST", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
 
     # Call the method
     success, result = mock_ups_rs_client.update_workitem(workitem_uid, transaction_uid, update_data)
@@ -345,8 +345,8 @@ def test_update_workitem(mock_ups_rs_client: UPSRSClient, response_factory: call
     # Check request
     assert len(mock_ups_rs_client.session.requests) == 1
     request = mock_ups_rs_client.session.requests[0]
-    assert request["method"] == "PUT"
-    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}?transaction-uid={transaction_uid}"
+    assert request["method"] == "POST"
+    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}?Transaction-uid={transaction_uid}"
     assert request["json"] == update_data
 
 
@@ -362,9 +362,9 @@ def test_update_workitem_no_transaction_uid(mock_ups_rs_client: UPSRSClient, res
     workitem_uid = "1.2.3.4.5"
     update_data = {"00741204": {"vr": "LO", "Value": ["Updated Procedure"]}}
 
-    # Configure mock response
+    # Configure mock response (POST per PS3.18 §11.6.1)
     response = response_factory(status_code=200, json_data={"status": "Success"})
-    mock_ups_rs_client.session.add_response("PUT", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
+    mock_ups_rs_client.session.add_response("POST", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
 
     # Call the method without transaction_uid
     success, result = mock_ups_rs_client.update_workitem(workitem_uid, None, update_data)
@@ -375,9 +375,9 @@ def test_update_workitem_no_transaction_uid(mock_ups_rs_client: UPSRSClient, res
     # Check request
     assert len(mock_ups_rs_client.session.requests) == 1
     request = mock_ups_rs_client.session.requests[0]
-    assert request["method"] == "PUT"
+    assert request["method"] == "POST"
     assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}"
-    assert "transaction-uid" not in request["url"]
+    assert "Transaction-uid" not in request["url"]
 
 
 def test_update_workitem_invalid_uid(mock_ups_rs_client: UPSRSClient) -> None:
@@ -432,7 +432,8 @@ def test_change_workitem_state_in_progress(mock_ups_rs_client: UPSRSClient, resp
     assert len(mock_ups_rs_client.session.requests) == 1
     request = mock_ups_rs_client.session.requests[0]
     assert request["method"] == "PUT"
-    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}/state"
+    # Per PS3.18 §11.7.1: requester AET is a query parameter, not a path segment
+    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}/state?requester=TEST_AE"
 
     # Check payload
     assert "00741000" in request["json"]
@@ -553,7 +554,8 @@ def test_request_cancellation(mock_ups_rs_client: UPSRSClient, response_factory:
     assert len(mock_ups_rs_client.session.requests) == 1
     request = mock_ups_rs_client.session.requests[0]
     assert request["method"] == "POST"
-    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}/cancelrequest"
+    # Per PS3.18 §11.8.1: requester AET is a query parameter, not a path segment
+    assert request["url"] == f"http://example.com/dicom-web/workitems/{workitem_uid}/cancelrequest?requester=TEST_AE"
 
     # Check payload
     assert "00741238" in request["json"]  # Reason For Cancellation

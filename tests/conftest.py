@@ -340,15 +340,41 @@ def sample_workitem() -> dict[str, Any]:
     scheduled_start = (now + timedelta(hours=1)).strftime("%Y%m%d%H%M%S")
     scheduled_end = (now + timedelta(hours=3)).strftime("%Y%m%d%H%M%S")
 
+    # Shape mirrors what a conformant UPS-RS SCP (e.g. dcm4chee-arc 5.x) will accept
+    # for create. SOP Class UID (0008,0016) is intentionally absent — the endpoint
+    # determines it and conformant servers reject it in the body.
     return {
         "00080018": {"vr": "UI", "Value": [uid]},  # SOP Instance UID
-        "00741000": {"vr": "CS", "Value": ["SCHEDULED"]},  # Procedure Step State
-        "00404041": {"vr": "CS", "Value": ["READY"]},  # Input Readiness State
-        "00404005": {"vr": "DT", "Value": [scheduled_start]},  # Scheduled Procedure Step Start DateTime
-        "00404011": {"vr": "DT", "Value": [scheduled_end]},  # Scheduled Procedure Step End DateTime
-        "00741204": {"vr": "LO", "Value": ["Test Procedure"]},  # Procedure Step Label
-        "00404000": {"vr": "CS", "Value": ["IMAGE_PROCESSING"]},  # Workitem Type
-        "00400007": {"vr": "LO", "Value": ["Test procedure step description"]},  # Procedure Step Description
+        "00100010": {"vr": "PN", "Value": [{"Alphabetic": "Test^Patient^One"}]},
+        "00100020": {"vr": "LO", "Value": ["TEST001"]},
+        "00100030": {"vr": "DA", "Value": ["19700101"]},
+        "00100040": {"vr": "CS", "Value": ["O"]},
+        "00380010": {"vr": "LO"},
+        "00380014": {"vr": "SQ"},
+        "0040A370": {"vr": "SQ"},
+        "00404005": {"vr": "DT", "Value": [scheduled_start]},
+        "00404011": {"vr": "DT", "Value": [scheduled_end]},
+        "00404018": {
+            "vr": "SQ",
+            "Value": [
+                {
+                    "00080100": {"vr": "SH", "Value": ["121726"]},
+                    "00080102": {"vr": "SH", "Value": ["DCM"]},
+                    "00080104": {"vr": "LO", "Value": ["RT Treatment with Internal Verification"]},
+                }
+            ],
+        },
+        "00404021": {"vr": "SQ"},
+        "00404025": {"vr": "SQ"},
+        "00404026": {"vr": "SQ"},
+        "00404027": {"vr": "SQ"},
+        "00404034": {"vr": "SQ"},
+        "00404041": {"vr": "CS", "Value": ["READY"]},
+        "00740120": {"vr": "SQ"},
+        "00741000": {"vr": "CS", "Value": ["SCHEDULED"]},
+        "00741200": {"vr": "CS", "Value": ["MEDIUM"]},
+        "00741202": {"vr": "LO", "Value": ["TEST_WORKLIST"]},
+        "00741204": {"vr": "LO", "Value": ["Test Procedure"]},
     }
 
 

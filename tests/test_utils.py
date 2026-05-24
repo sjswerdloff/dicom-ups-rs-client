@@ -27,53 +27,31 @@ def test_validate_uid() -> None:
 
 
 def test_create_default_workitem() -> None:
-    """Test the _create_default_workitem method."""
+    """Test the _create_default_workitem method produces a spec-conformant workitem."""
     client = UPSRSClient(base_url="http://example.com/dicom-web")
 
-    # Get the default workitem
     workitem = client._create_default_workitem()
 
-    # Check required attributes
-    assert "00741000" in workitem  # Procedure Step State
-    assert workitem["00741000"]["vr"] == "CS"
+    # Type 1 attributes required by PS3.4 CC.2.5-3 must be present with values
     assert workitem["00741000"]["Value"][0] == "SCHEDULED"
-
-    assert "00404041" in workitem  # Input Readiness State
-    assert workitem["00404041"]["vr"] == "CS"
+    assert workitem["00741200"]["Value"][0] == "MEDIUM"  # Scheduled Procedure Step Priority
     assert workitem["00404041"]["Value"][0] == "READY"
-
-    assert "00404005" in workitem  # Scheduled Procedure Step Start DateTime
+    assert workitem["00741204"]["Value"]  # Procedure Step Label, non-empty
     assert workitem["00404005"]["vr"] == "DT"
 
-    assert "00404011" in workitem  # Scheduled Procedure Step End DateTime
-    assert workitem["00404011"]["vr"] == "DT"
+    # Scheduled Workitem Code Sequence must contain a code item
+    code_item = workitem["00404018"]["Value"][0]
+    assert code_item["00080100"]["Value"]  # Code Value
+    assert code_item["00080102"]["Value"]  # Coding Scheme Designator
+    assert code_item["00080104"]["Value"]  # Code Meaning
 
-    assert "00741204" in workitem  # Procedure Step Label
-    assert workitem["00741204"]["vr"] == "LO"
-    assert workitem["00741204"]["Value"][0] == "Example Procedure"
+    # SOP Class UID must NOT be in the body — determined by endpoint, rejected by conformant SCPs
+    assert "00080016" not in workitem
 
-    assert "00404000" in workitem  # Workitem Type
-    assert workitem["00404000"]["vr"] == "CS"
-    assert workitem["00404000"]["Value"][0] == "IMAGE_PROCESSING"
-
-    assert "00400007" in workitem  # Procedure Step Description
-    assert workitem["00400007"]["vr"] == "LO"
-    assert workitem["00400007"]["Value"][0] == "Example procedure step description"
-
-    # Check datetime values
-    start_str = workitem["00404005"]["Value"][0]
-    end_str = workitem["00404011"]["Value"][0]
-
-    # Parse the datetimes
-    start_dt = datetime.strptime(start_str, "%Y%m%d%H%M%S")
-    end_dt = datetime.strptime(end_str, "%Y%m%d%H%M%S")
-
-    # Scheduled start should be in the future
-    now = datetime.now()
-    assert start_dt > now
-
-    # Scheduled end should be after start
-    assert end_dt > start_dt
+    # Scheduled times: start in the future, end after start
+    start_dt = datetime.strptime(workitem["00404005"]["Value"][0], "%Y%m%d%H%M%S")
+    end_dt = datetime.strptime(workitem["00404011"]["Value"][0], "%Y%m%d%H%M%S")
+    assert start_dt > datetime.now()
     assert (end_dt - start_dt) >= timedelta(hours=1)
 
 

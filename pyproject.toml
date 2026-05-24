@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-ups-rs-client = "ups_rs_client:main"
+ups-rs-client = "dicom_ups_rs_client.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/dicom-ups-rs-client"

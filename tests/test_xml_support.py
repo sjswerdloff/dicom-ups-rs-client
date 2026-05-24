@@ -511,7 +511,7 @@ class TestXmlClientUpdateWorkitem:
         response.content = b"{}"
         response.headers["Content-Type"] = CONTENT_TYPE_JSON
         mock_ups_rs_xml_client.session.add_response(
-            "PUT", rf"http://example.com/dicom-web/workitems/{uid}\?transaction-uid={txn_uid}", response
+            "POST", rf"http://example.com/dicom-web/workitems/{uid}\?Transaction-uid={txn_uid}", response
         )
 
         update_data = {"00741204": {"vr": "LO", "Value": ["Updated"]}}

@@ -139,7 +139,7 @@ async def test_update_workitem_async(mock_ups_rs_client: UPSRSClient, response_f
 
     # Configure mock response
     response = response_factory(status_code=200, json_data={"status": "Success"})
-    mock_ups_rs_client.session.add_response("PUT", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
+    mock_ups_rs_client.session.add_response("POST", f"http://example.com/dicom-web/workitems/{workitem_uid}", response)
 
     # Create a mock method for the synchronous version that we can check was called
     original_method = mock_ups_rs_client.update_workitem
