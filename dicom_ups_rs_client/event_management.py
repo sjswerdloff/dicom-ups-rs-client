@@ -1,6 +1,7 @@
 """Event management mixin for DICOM UPS-RS Client."""
 
 from typing import Any
+from urllib.parse import urlencode
 
 from dicom_ups_rs_client.exceptions import UPSRSValidationError
 
@@ -55,16 +56,16 @@ class EventManagementMixin:
         if not self.aetitle:  # type: ignore[attr-defined]
             return False, "AE Title is required for subscription operations"
 
-        # Build filter parameter string
+        # Build filter parameter string per DICOM PS3.18: KeyValuePair[,KeyValuePair]*
         filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
 
-        # Set endpoint URL with filter parameter
+        # Set endpoint URL with filter parameter. urlencode percent-encodes reserved
+        # characters in the value; the server URL-decodes before parsing DICOM syntax.
         endpoint = f"{self.base_url}/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/{self.aetitle}"  # type: ignore[attr-defined]
-        endpoint += f"?filter={filter_str}"
-
-        # Add deletion lock parameter if requested
+        params: dict[str, str] = {"filter": filter_str}
         if deletion_lock:
-            endpoint += "&deletionlock=true"
+            params["deletionlock"] = "true"
+        endpoint += "?" + urlencode(params)
 
         return self._send_subscription_request(endpoint)  # type: ignore[attr-defined]
 
@@ -142,17 +143,17 @@ class EventManagementMixin:
         if not self.aetitle:  # type: ignore[attr-defined]
             return False, "AE Title is required for subscription operations"
 
-        # Set endpoint URL
+        # Set endpoint URL. urlencode percent-encodes reserved characters in the
+        # filter value; the server URL-decodes before parsing DICOM syntax.
         endpoint = f"{self.base_url}/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/{self.aetitle}"  # type: ignore[attr-defined]
 
-        query_params: list[str] = []
+        params: dict[str, str] = {}
         if filter_params:
-            filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
-            query_params.append(f"filter={filter_str}")
+            params["filter"] = ",".join([f"{key}={value}" for key, value in filter_params.items()])
         if deletion_lock:
-            query_params.append("deletionlock=true")
-        if query_params:
-            endpoint += "?" + "&".join(query_params)
+            params["deletionlock"] = "true"
+        if params:
+            endpoint += "?" + urlencode(params)
 
         return self._send_unsubscription_request(endpoint)  # type: ignore[attr-defined]
 

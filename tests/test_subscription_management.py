@@ -1,5 +1,7 @@
 """Tests for UPS-RS client subscription management operations."""
 
+from urllib.parse import parse_qs, urlparse
+
 from dicom_ups_rs_client.ups_rs_client import UPSRSClient
 
 
@@ -143,7 +145,9 @@ def test_subscribe_to_filtered_worklist(mock_ups_rs_client: UPSRSClient, respons
     assert "filter=" in request["url"]
 
     # Check that filter parameters are in the URL
-    filter_parts = request["url"].split("filter=")[1].split("&")[0].split(",")
+    # Filter value is URL-encoded on the wire; decode before splitting on DICOM ',' delimiter.
+    filter_value = parse_qs(urlparse(request["url"]).query)["filter"][0]
+    filter_parts = filter_value.split(",")
     assert "00741000=SCHEDULED" in filter_parts
     assert "00741200=HIGH" in filter_parts
 
@@ -347,7 +351,9 @@ def test_unsubscribe_from_filtered_worklist(mock_ups_rs_client: UPSRSClient, res
     assert "filter=" in request["url"]
 
     # Check that filter parameters are in the URL
-    filter_parts = request["url"].split("filter=")[1].split("&")[0].split(",")
+    # Filter value is URL-encoded on the wire; decode before splitting on DICOM ',' delimiter.
+    filter_value = parse_qs(urlparse(request["url"]).query)["filter"][0]
+    filter_parts = filter_value.split(",")
     assert "00741000=SCHEDULED" in filter_parts
     assert "00741200=HIGH" in filter_parts
 
