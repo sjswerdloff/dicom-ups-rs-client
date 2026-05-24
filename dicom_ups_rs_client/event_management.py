@@ -120,13 +120,19 @@ class EventManagementMixin:
         return self._send_unsubscription_request(endpoint)  # type: ignore[attr-defined]
 
     def unsubscribe_from_filtered_worklist(
-        self, filter_params: dict[str, str], deletion_lock: bool = False
+        self, filter_params: dict[str, str] | None = None, deletion_lock: bool = False
     ) -> tuple[bool, dict[str, Any] | str]:
         """
         Unsubscribe from workitems matching the specified filter criteria.
 
+        Per PS3.18 §11.10, the DELETE on /workitems/{uid}/subscribers/{AET}
+        identifies the subscription by the subscriber AE Title; the filter
+        parameters are not required on unsubscribe.
+
         Args:
-            filter_params: dictionary of attribute/value pairs to filter on
+            filter_params: Optional dictionary of filter parameters. Servers do
+                not need these to identify the subscription on DELETE, but some
+                may echo them for logging. Omit (default) for a plain unsubscribe.
             deletion_lock: Whether to request a deletion lock for the subscription
 
         Returns:
@@ -136,16 +142,17 @@ class EventManagementMixin:
         if not self.aetitle:  # type: ignore[attr-defined]
             return False, "AE Title is required for subscription operations"
 
-        # Build filter parameter string
-        filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
-
-        # Set endpoint URL with filter parameter
+        # Set endpoint URL
         endpoint = f"{self.base_url}/workitems/1.2.840.10008.5.1.4.34.5.1/subscribers/{self.aetitle}"  # type: ignore[attr-defined]
-        endpoint += f"?filter={filter_str}"
 
-        # Add deletion lock parameter if requested
+        query_params: list[str] = []
+        if filter_params:
+            filter_str = ",".join([f"{key}={value}" for key, value in filter_params.items()])
+            query_params.append(f"filter={filter_str}")
         if deletion_lock:
-            endpoint += "&deletionlock=true"
+            query_params.append("deletionlock=true")
+        if query_params:
+            endpoint += "?" + "&".join(query_params)
 
         return self._send_unsubscription_request(endpoint)  # type: ignore[attr-defined]
 
