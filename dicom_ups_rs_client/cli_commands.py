@@ -440,8 +440,9 @@ def handle_unsubscribe_command(client: UPSRSClient, args: argparse.Namespace) ->
         success, response = client.unsubscribe_from_worklist(args.deletion_lock)
         subscription_type = "worklist"
     elif args.filtered_worklist:
-        # Parse filter parameters
-        filter_params = {}
+        # Parse filter parameters (optional for unsubscribe; the server identifies
+        # the subscription by the subscriber AE Title per PS3.18 §11.10)
+        filter_params: dict[str, str] = {}
         for param in args.filter:
             if "=" in param:
                 key, value = param.split("=", 1)
@@ -449,11 +450,7 @@ def handle_unsubscribe_command(client: UPSRSClient, args: argparse.Namespace) ->
             else:
                 logging.warning(f"Ignoring invalid filter parameter (missing '='): {param}")
 
-        if not filter_params:
-            logging.error("Filtered worklist subscription requires at least one filter parameter")
-            sys.exit(1)
-
-        success, response = client.unsubscribe_from_filtered_worklist(filter_params, args.deletion_lock)
+        success, response = client.unsubscribe_from_filtered_worklist(filter_params or None, args.deletion_lock)
         subscription_type = "filtered worklist"
     else:  # workitem
         success, response = client.unsubscribe_from_workitem(args.workitem, args.deletion_lock)
