@@ -7,7 +7,6 @@ import logging
 import sys
 
 import dicom_ups_rs_client.ups_rs_client as _ups_rs_module
-from dicom_ups_rs_client.ups_rs_client import SERVER_FLAVORS
 from dicom_ups_rs_client.cli_commands import (
     handle_cancel_request_command,
     handle_change_state_command,
@@ -19,6 +18,7 @@ from dicom_ups_rs_client.cli_commands import (
     handle_update_command,
 )
 from dicom_ups_rs_client.serialization import CONTENT_TYPE_JSON, CONTENT_TYPE_XML
+from dicom_ups_rs_client.ups_rs_client import SERVER_FLAVORS
 
 
 def main() -> None:

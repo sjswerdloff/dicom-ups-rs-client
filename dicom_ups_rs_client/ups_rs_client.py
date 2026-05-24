@@ -8,9 +8,6 @@ from urllib.parse import urlencode
 import requests
 from pydicom.uid import generate_uid
 
-ServerFlavor = Literal["standard", "dcm4chee"]
-SERVER_FLAVORS: tuple[ServerFlavor, ...] = ("standard", "dcm4chee")
-
 from dicom_ups_rs_client.async_operations import AsyncOperationsMixin
 from dicom_ups_rs_client.enums import InputReadinessState, UPSState
 from dicom_ups_rs_client.event_management import EventManagementMixin
@@ -24,6 +21,9 @@ from dicom_ups_rs_client.serialization import (
 )
 from dicom_ups_rs_client.websocket import WebSocketMixin
 from dicom_ups_rs_client.workitem_utils import WorkitemUtilsMixin
+
+ServerFlavor = Literal["standard", "dcm4chee"]
+SERVER_FLAVORS: tuple[ServerFlavor, ...] = ("standard", "dcm4chee")
 
 __all__ = [
     "UPSRSClient",
